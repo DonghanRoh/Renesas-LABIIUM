@@ -3,7 +3,7 @@ import time
 class hmp4040():
 
     def __init__(self, pyvisa_instr):
-        self.hmp4040 = pyvisa_instr # this is the pyvisa instrument, rm.open_resource('ASRL6::INSTR')
+        self.hmp4040 = pyvisa_instr # this is the pyvisa instrument, rm.open_resource('ASRL7::INSTR')
         self.channel_list = [1, 2, 3, 4]
 
     def get_inst_state(self):

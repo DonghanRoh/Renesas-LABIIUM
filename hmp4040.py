@@ -16,7 +16,7 @@ class hmp4040():
             current          = float(self.hmp4040.query('MEASure:CURRent?'))
             volt_prot        = float(self.hmp4040.query('VOLTage:PROTection?'))
             volt_prot_active = self.hmp4040.query('VOLTage:PROTection:MODE?').rstrip('\r\n')
-            print "Channel %d voltage is %.02f V, overvoltage limit is %.02f overvolt config is %s, current limit is %.02f A, current is %.03f A status is %s" % (channel,voltage,volt_prot,volt_prot_active,current_lim,current,status)
+            print ("Channel %d voltage is %.02f V, overvoltage limit is %.02f overvolt config is %s, current limit is %.02f A, current is %.03f A status is %s" % (channel,voltage,volt_prot,volt_prot_active,current_lim,current,status))
 
     def get_channel_scpi_list(self, channel=1):
         result_list = []

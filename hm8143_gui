@@ -1,4 +1,4 @@
-# hmp4040_gui_no_threads.py
+# hm8143_gui_no_threads.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 import time
@@ -8,7 +8,7 @@ try:
 except Exception:
     pyvisa = None  # Simulated mode can still run
 
-from hmp4040 import hmp4040 as HMP4040Class
+from hm8143 import hm8143 as HM8143Class
 
 
 # -----------------------------
@@ -26,7 +26,7 @@ class MockInstrument:
                 "MEAS_I": 0.0,
                 "OVP_MODE": "measured",
             }
-            for ch in [1, 2, 3, 4]
+            for ch in [1, 2, 3]
         }
 
     def write(self, cmd: str):
@@ -69,7 +69,7 @@ class MockInstrument:
     def query(self, cmd: str) -> str:
         cmd = cmd.strip()
         if cmd.upper().startswith("*IDN?"):
-            return "Rohde&Schwarz,HMP4040,Mock,1.00"
+            return "Rohde&Schwarz,HM8143,Mock,1.00"
         if cmd.upper().startswith("SOURCE:VOLTAGE?"):
             return f"{self.channels[self.selected_ch]['VOLT']:.3f}"
         if cmd.upper().startswith("SOURCE:CURRENT?"):
@@ -91,10 +91,10 @@ class MockInstrument:
 # -----------------------------
 # GUI (no threading)
 # -----------------------------
-class HMP4040GUI(tk.Tk):
+class HM8143GUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("HMP4040 Control GUI (no threading)")
+        self.title("HM8143 Control GUI")
         self.geometry("900x660")
 
         self.rm = None
@@ -251,7 +251,7 @@ class HMP4040GUI(tk.Tk):
             idn = self.inst.query("*IDN?").strip()
             self.idn_label.config(text=f"[IDN] {idn}")
             self.connected = True
-            self.wrapper = HMP4040Class(pyvisa_instr=self.inst)
+            self.wrapper = HM8143Class(pyvisa_instr=self.inst)
             self.select_channel()
             self.log_line(f"[INFO] Connected: {idn}")
             self.status.set("Connected.")
@@ -463,5 +463,5 @@ class HMP4040GUI(tk.Tk):
 
 
 if __name__ == "__main__":
-    app = HMP4040GUI()
+    app = HM8143GUI()
     app.mainloop()

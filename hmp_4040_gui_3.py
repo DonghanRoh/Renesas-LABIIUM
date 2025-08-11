@@ -3,7 +3,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import time
 
-import pyvisa  # hard import as requested
+import pyvisa  # hard import (no try/except)
 from hmp4040 import hmp4040 as HMP4040Class
 
 
@@ -91,7 +91,7 @@ class HMP4040GUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("HMP4040 Control GUI (no threading)")
-        self.geometry("1040x680")
+        self.geometry("1100x680")
 
         self.rm = None
         self.inst = None
@@ -100,25 +100,26 @@ class HMP4040GUI(tk.Tk):
         self.simulated = tk.BooleanVar(value=False)
         self._unique_cache = []
 
-        # current connection state
-        self.current_idn = None              # IDN string for display
-        self.current_resource_key = None     # VISA Resource (or SIMULATED#n) -> the ONLY key for labeling
+        # Current connection info
+        self.current_idn = None               # Display-only
+        self.current_resource_key = None      # VISA Resource (or SIMULATED#n)
 
-        # session devices: resource_key -> {"idn": str, "label": str}
+        # Session device registry: resource_key -> {"idn": str, "label": str}
         self.devices = {}
+        self.display_order = []               # list of resource_keys in the listbox order
 
-        # simulated resource unique counter
+        # Simulated unique key counter
         self.sim_counter = 0
 
         self._build_ui()
 
     # ---------- UI ----------
     def _build_ui(self):
-        # top bar: left(connection), right(device list)
+        # Top bar: left(connection), right(devices)
         topbar = ttk.Frame(self)
         topbar.pack(fill="x", padx=10, pady=(10, 0))
 
-        # left: connection group
+        # Left: Connection group
         conn = ttk.LabelFrame(topbar, text="Connection")
         conn.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
@@ -132,31 +133,36 @@ class HMP4040GUI(tk.Tk):
         ttk.Button(conn, text="Scan", command=self.scan_resources).grid(row=0, column=3, padx=6, pady=6)
         ttk.Button(conn, text="Connect", command=self.connect).grid(row=0, column=4, padx=6, pady=6)
 
-        # user device label entry (between Connect and IDN)
-        self.device_name_var = tk.StringVar(value="PSU")
-        self.device_name_entry = ttk.Entry(conn, textvariable=self.device_name_var, width=16)
-        self.device_name_entry.grid(row=0, column=5, padx=6, pady=6, sticky="w")
-
-        # IDN label
+        # IDN banner (shows label only for the CURRENTLY CONNECTED device)
         self.idn_label = ttk.Label(conn, text="[IDN] - Not connected")
-        self.idn_label.grid(row=0, column=6, padx=6, pady=6, sticky="w")
+        self.idn_label.grid(row=0, column=5, padx=6, pady=6, sticky="w")
 
-        # when label text changes, only update the CURRENT resource's label
-        try:
-            self.device_name_var.trace_add("write", lambda *args: self._on_label_changed())
-        except Exception:
-            self.device_name_var.trace("w", lambda *args: self._on_label_changed())
-
-        # right: devices list (one column)
+        # Right: Devices (per-instrument labeling)
         devf = ttk.LabelFrame(topbar, text="Devices (this session)")
         devf.pack(side="right", fill="y")
 
-        ttk.Label(devf, text="Shown by VISA Resource").pack(anchor="w", padx=6, pady=(6, 0))
+        ttk.Label(devf, text="Keyed by VISA Resource").pack(anchor="w", padx=6, pady=(6, 0))
 
-        self.device_listbox = tk.Listbox(devf, height=10, width=56, exportselection=False)
-        self.device_listbox.pack(fill="both", expand=True, padx=6, pady=6)
+        self.device_listbox = tk.Listbox(devf, height=10, width=60, exportselection=False)
+        self.device_listbox.pack(fill="both", expand=True, padx=6, pady=(6, 4))
+        self.device_listbox.bind("<<ListboxSelect>>", self._on_device_selected)
+        self.device_listbox.bind("<Double-Button-1>", self._on_device_selected)
 
-        # body
+        editor = ttk.Frame(devf)
+        editor.pack(fill="x", padx=6, pady=(0, 8))
+
+        ttk.Label(editor, text="Label for selected:").grid(row=0, column=0, padx=(0, 6), pady=4, sticky="e")
+        self.sel_label_var = tk.StringVar(value="")
+        self.sel_label_entry = ttk.Entry(editor, textvariable=self.sel_label_var, width=30)
+        self.sel_label_entry.grid(row=0, column=1, padx=(0, 6), pady=4, sticky="we")
+        self.sel_label_entry.bind("<Return>", lambda e: self._save_selected_label())
+
+        ttk.Button(editor, text="Save Label", command=self._save_selected_label).grid(row=0, column=2, padx=(0, 6), pady=4)
+        ttk.Button(editor, text="Clear", command=lambda: self.sel_label_var.set("")).grid(row=0, column=3, padx=(0, 0), pady=4)
+
+        editor.grid_columnconfigure(1, weight=1)
+
+        # Body frames
         mid = ttk.LabelFrame(self, text="Channel & Settings")
         mid.pack(fill="x", padx=10, pady=10)
 
@@ -232,11 +238,14 @@ class HMP4040GUI(tk.Tk):
         else:
             return f"[IDN] {clean_idn} ({resource_key})"
 
-    def _refresh_device_list(self):
+    def _refresh_device_list(self, auto_select_key: str = None):
         """Refresh the right-top device list (one column)."""
         self.device_listbox.delete(0, "end")
+        self.display_order = []
+
         if not self.devices:
             self.device_listbox.insert("end", "(No devices yet)")
+            self.display_order = []
             return
 
         labeled = []
@@ -251,34 +260,60 @@ class HMP4040GUI(tk.Tk):
         for key, info in labeled + unlabeled:
             line = self._compose_display_line(info.get("idn", ""), info.get("label", ""), key)
             self.device_listbox.insert("end", line)
+            self.display_order.append(key)
 
-    def _update_idn_label(self):
-        """Update the IDN display label at the top (uses VISA Resource as the key)."""
-        label = (self.device_name_var.get() or "").strip()
-        if self.current_idn and self.current_resource_key:
-            self.idn_label.config(
-                text=self._compose_display_line(self.current_idn, label, self.current_resource_key)
-            )
+        # Auto-select a specific item if requested
+        if auto_select_key and auto_select_key in self.display_order:
+            idx = self.display_order.index(auto_select_key)
+            self.device_listbox.selection_clear(0, "end")
+            self.device_listbox.selection_set(idx)
+            self.device_listbox.see(idx)
+            self._load_selected_label_into_editor()
+
+    def _update_idn_banner(self):
+        """Update the banner showing the currently connected device."""
+        if self.current_resource_key and self.current_resource_key in self.devices:
+            info = self.devices[self.current_resource_key]
+            label = info.get("label", "")
+            idn = info.get("idn", self.current_idn or "")
+            self.idn_label.config(self._label_kwargs(idn, label, self.current_resource_key))
         else:
-            if label:
-                self.idn_label.config(text=f"{label} | [IDN] - Not connected")
-            else:
-                self.idn_label.config(text="[IDN] - Not connected")
+            # Not connected
+            self.idn_label.config(text="[IDN] - Not connected")
 
-    def _record_connected_device(self):
-        """Store/update the current device by VISA Resource key."""
-        if not self.current_resource_key or not self.current_idn:
+    def _label_kwargs(self, idn: str, label: str, resource_key: str):
+        return {"text": self._compose_display_line(idn, label, resource_key)}
+
+    def _on_device_selected(self, event=None):
+        self._load_selected_label_into_editor()
+
+    def _get_selected_resource_key(self):
+        sel = self.device_listbox.curselection()
+        if not sel:
+            return None
+        idx = sel[0]
+        if 0 <= idx < len(self.display_order):
+            return self.display_order[idx]
+        return None
+
+    def _load_selected_label_into_editor(self):
+        key = self._get_selected_resource_key()
+        if key and key in self.devices:
+            self.sel_label_var.set(self.devices[key].get("label", ""))
+        else:
+            self.sel_label_var.set("")
+
+    def _save_selected_label(self):
+        key = self._get_selected_resource_key()
+        if not key or key not in self.devices:
+            messagebox.showinfo("No selection", "Please select a device in the list first.")
             return
-        current_label = (self.device_name_var.get() or "").strip()
-        self.devices[self.current_resource_key] = {"idn": self.current_idn, "label": current_label}
-        self._refresh_device_list()
-
-    def _on_label_changed(self):
-        """Only update the CURRENT device's label when the Entry changes."""
-        self._update_idn_label()
-        if self.current_resource_key in self.devices:
-            self.devices[self.current_resource_key]["label"] = (self.device_name_var.get() or "").strip()
-            self._refresh_device_list()
+        new_label = (self.sel_label_var.get() or "").strip()
+        self.devices[key]["label"] = new_label
+        self._refresh_device_list(auto_select_key=key)
+        # If the edited device is also the currently connected one, update the banner.
+        if key == self.current_resource_key:
+            self._update_idn_banner()
 
     # ---------- connection ----------
     def _on_toggle_sim(self):
@@ -317,20 +352,15 @@ class HMP4040GUI(tk.Tk):
         try:
             if self.simulated.get():
                 self.inst = MockInstrument()
-                # unique resource key for simulated each time
                 self.sim_counter += 1
-                self.current_resource_key = f"SIMULATED#{self.sim_counter}"
+                resource_key = f"SIMULATED#{self.sim_counter}"
             else:
                 if self.rm is None:
                     self.rm = pyvisa.ResourceManager()
-                resource = self.resource_cb.get().strip()
-                if not resource:
+                resource_key = self.resource_cb.get().strip()
+                if not resource_key:
                     raise RuntimeError("Please select a VISA resource.")
-                self.inst = self.rm.open_resource(resource)
-                # use raw resource string as the unique key
-                self.current_resource_key = resource
-
-                # moderate timeouts
+                self.inst = self.rm.open_resource(resource_key)
                 try:
                     self.inst.timeout = 1000  # ms
                     self.inst.write_timeout = 1000
@@ -340,17 +370,25 @@ class HMP4040GUI(tk.Tk):
                     pass
 
             idn = self.inst.query("*IDN?").strip()
+            self.current_resource_key = resource_key
             self.current_idn = idn
-            self._update_idn_label()
+
+            # Register/update device in session
+            if resource_key not in self.devices:
+                self.devices[resource_key] = {"idn": idn, "label": ""}
+            else:
+                self.devices[resource_key]["idn"] = idn  # keep label as-is
 
             self.connected = True
             self.wrapper = HMP4040Class(pyvisa_instr=self.inst)
-            self.select_channel()
-            self.log_line(f"[INFO] Connected: {idn} ({self.current_resource_key})")
-            self.status.set("Connected.")
 
-            # add/update device by VISA Resource key
-            self._record_connected_device()
+            # Refresh list and select the connected device; update banner
+            self._refresh_device_list(auto_select_key=resource_key)
+            self._update_idn_banner()
+
+            self.select_channel()
+            self.log_line(f"[INFO] Connected: {idn} ({resource_key})")
+            self.status.set("Connected.")
 
         except Exception as e:
             self.connected = False
@@ -487,7 +525,6 @@ class HMP4040GUI(tk.Tk):
     def _do_reset_inst(self):
         try:
             self.inst.write("*RST")
-            # quick status tick
             self.after(300, lambda: self.status.set("Instrument reset done."))
             self.log_line("[SCPI] *RST")
         except Exception as e:
@@ -560,6 +597,5 @@ class HMP4040GUI(tk.Tk):
 
 
 if __name__ == "__main__":
-    # Make sure exactly one Tk root is created here.
     app = HMP4040GUI()
     app.mainloop()

@@ -1,186 +1,199 @@
-# connection_gui.py
-# Purpose: Minimal VISA Scan & Connect GUI without simulation mode or device-specific references.
+# general_scpi_gui.py
+# General SCPI GUI with robust ASRL (serial) connection logic
+# - Single window for any instrument
+# - VISA scan, connect/disconnect
+# - Built-in general SCPI commands (IDN/CLS/RST/OPC/WAI/TST/ESE/ESR/SRE/STB/SYST:ERR)
+# - Param field for commands needing a value (e.g., *ESE, *SRE)
+# - Custom SCPI write/query
+# - Log window
+# - Robust serial open based on user's reference (tries common baud/EOL combos)
 
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 import pyvisa
-from pyvisa import constants as pv  # parity/stopbits constants
+from pyvisa import constants as pv
 
 
-class DeviceShell:
-    """Lightweight holder for a PyVISA instrument."""
-    def __init__(self, pyvisa_instr):
-        self.inst = pyvisa_instr
+def trim(s: str) -> str:
+    return (s or "").strip()
 
 
-class GUI(tk.Tk):
+COMMANDS = [
+    "*IDN?",
+    "*CLS",
+    "*RST",
+    "*OPC?",
+    "*WAI",
+    "*TST?",
+    "*ESE {param}",
+    "*ESR?",
+    "*SRE {param}",
+    "*STB?",
+    "SYST:ERR?",
+]
+
+QUERYABLE_BASES = {"*IDN", "*OPC", "*TST", "*ESR", "*STB", "SYST:ERR"}
+
+
+class GeneralSCPIGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("VISA Scan & Connect")
-        self.geometry("900x520")
-
+        self.title("General SCPI GUI (PyVISA)")
+        self.geometry("980x700")
         self.rm = None
-        self.sessions = {}
-        self.scanned_resources = []
-        self.current_resource_key = None
-        self.current_idn = None
-        self.sel_label_var = tk.StringVar(value="")
-
+        self.inst = None
+        self.connected_resource = None
         self._build_ui()
 
-    # ---------- UI ----------
+    # ----------------------------- UI -----------------------------
     def _build_ui(self):
-        # Connection toolbar
-        topbar = ttk.LabelFrame(self, text="Connection")
-        topbar.pack(fill="x", padx=10, pady=(10, 0))
+        # Connection bar
+        conn = ttk.LabelFrame(self, text="Connection")
+        conn.pack(fill="x", padx=10, pady=(10, 8))
 
-        ttk.Button(topbar, text="Scan", command=self.scan_resources).grid(row=0, column=0, padx=6, pady=6, sticky="w")
-        ttk.Button(topbar, text="Connect All", command=self.connect_all).grid(row=0, column=1, padx=6, pady=6, sticky="w")
+        ttk.Button(conn, text="Scan VISA", command=self.scan_resources).grid(row=0, column=0, padx=6, pady=8)
+        ttk.Label(conn, text="Resource:").grid(row=0, column=1, padx=(12, 6), pady=8, sticky="e")
+        self.resource_var = tk.StringVar()
+        self.resource_combo = ttk.Combobox(conn, textvariable=self.resource_var, width=44, state="readonly")
+        self.resource_combo.grid(row=0, column=2, padx=(0, 6), pady=8, sticky="w")
 
-        self.idn_label = ttk.Label(topbar, text="[IDN] - Not connected")
-        self.idn_label.grid(row=0, column=2, padx=6, pady=6, sticky="w")
+        ttk.Button(conn, text="Connect", command=self.connect_selected).grid(row=0, column=3, padx=6, pady=8)
+        ttk.Button(conn, text="Disconnect", command=self.disconnect).grid(row=0, column=4, padx=6, pady=8)
 
-        # Devices table
-        devf = ttk.LabelFrame(self, text="Devices (scanned & connected)")
-        devf.pack(fill="both", expand=False, padx=10, pady=(10, 10))
+        self.idn_label = ttk.Label(conn, text="[IDN] - Not connected")
+        self.idn_label.grid(row=1, column=0, columnspan=5, padx=6, pady=(0, 8), sticky="w")
 
-        columns = ("resource", "idn", "label")
-        self.dev_tree = ttk.Treeview(devf, columns=columns, show="headings", height=7)
-        self.dev_tree.heading("resource", text="VISA Resource")
-        self.dev_tree.heading("idn", text="IDN")
-        self.dev_tree.heading("label", text="Label")
-        self.dev_tree.column("resource", width=250, anchor="w")
-        self.dev_tree.column("idn", width=350, anchor="w")
-        self.dev_tree.column("label", width=200, anchor="w")
-        self.dev_tree.pack(fill="both", expand=True, padx=6, pady=(6, 0))
-        self.dev_tree.bind("<<TreeviewSelect>>", self._on_tree_selection)
+        # Command panel
+        cmdf = ttk.LabelFrame(self, text="General SCPI Command")
+        cmdf.pack(fill="x", padx=10, pady=(0, 8))
 
-        # Label editor
-        editor = ttk.Frame(devf)
-        editor.pack(fill="x", padx=6, pady=(6, 6))
-        ttk.Label(editor, text="Label for selected:").grid(row=0, column=0, padx=(0, 6), pady=4, sticky="e")
-        self.sel_label_entry = ttk.Entry(editor, textvariable=self.sel_label_var, width=40)
-        self.sel_label_entry.grid(row=0, column=1, padx=(0, 6), pady=4, sticky="we")
-        ttk.Button(editor, text="Save Label", command=self._save_selected_label).grid(row=0, column=2, padx=6, pady=4)
-        editor.grid_columnconfigure(1, weight=1)
+        ttk.Label(cmdf, text="Command:").grid(row=0, column=0, padx=6, pady=8, sticky="e")
+        self.cmd_var = tk.StringVar(value=COMMANDS[0])
+        self.cmd_combo = ttk.Combobox(cmdf, textvariable=self.cmd_var, values=COMMANDS, width=30, state="readonly")
+        self.cmd_combo.grid(row=0, column=1, padx=(0, 8), pady=8, sticky="w")
 
-        # Log section
+        ttk.Label(cmdf, text="Param (if needed):").grid(row=0, column=2, padx=6, pady=8, sticky="e")
+        self.param_var = tk.StringVar(value="")
+        ttk.Entry(cmdf, textvariable=self.param_var, width=18).grid(row=0, column=3, padx=(0, 8), pady=8, sticky="w")
+
+        ttk.Button(cmdf, text="Write", command=self.do_write).grid(row=0, column=4, padx=6, pady=8)
+        ttk.Button(cmdf, text="Query", command=self.do_query).grid(row=0, column=5, padx=6, pady=8)
+
+        ttk.Label(cmdf, text="Custom SCPI:").grid(row=1, column=0, padx=6, pady=(0, 8), sticky="e")
+        self.custom_var = tk.StringVar()
+        ttk.Entry(cmdf, textvariable=self.custom_var).grid(row=1, column=1, columnspan=3, padx=(0, 8), pady=(0, 8), sticky="we")
+        ttk.Button(cmdf, text="Write (custom)", command=self.custom_write).grid(row=1, column=4, padx=6, pady=(0, 8))
+        ttk.Button(cmdf, text="Query (custom)", command=self.custom_query).grid(row=1, column=5, padx=6, pady=(0, 8))
+
+        cmdf.grid_columnconfigure(1, weight=1)
+
+        # Log
         logf = ttk.LabelFrame(self, text="Log")
         logf.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-        log_toolbar = ttk.Frame(logf)
-        log_toolbar.pack(fill="x", padx=6, pady=(6, 0))
-        ttk.Button(log_toolbar, text="Clear Log", command=self.clear_log).pack(side="right")
-
-        self.log = tk.Text(logf, height=12)
+        self.log = tk.Text(logf, height=18)
         self.log.pack(fill="both", expand=True, padx=6, pady=6)
 
         # Status bar
         self.status = tk.StringVar(value="Ready.")
         ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w").pack(fill="x")
 
-    # ---------- helpers ----------
-    def _busy(self, on=True, msg=None):
-        """Set busy cursor and optional status message."""
-        self.config(cursor="watch" if on else "")
-        if msg:
-            self.status.set(msg)
-        self.update_idletasks()
-
-    def log_line(self, msg: str):
-        """Append a line to the log text box."""
-        self.log.insert("end", msg + "\n")
-        self.log.see("end")
-
-    def clear_log(self):
-        """Clear the log and update status."""
-        self.log.delete("1.0", "end")
-        self.status.set("Log cleared.")
-
-    def _update_idn_banner(self):
-        """Update the IDN banner for the selected device."""
-        if self.current_resource_key and self.current_resource_key in self.sessions:
-            info = self.sessions[self.current_resource_key]
-            label = info.get("label") or ""
-            idn = info.get("idn") or ""
-            base = f"[IDN] {idn} ({self.current_resource_key})"
-            self.idn_label.config(text=(f"{label} | {base}" if label else base))
-        else:
-            self.idn_label.config(text="[IDN] - Not connected")
-
-    def _on_tree_selection(self, event=None):
-        """Handle device selection in the tree."""
-        sel = self.dev_tree.selection()
-        if not sel:
-            return
-        key = sel[0]
-        if key in self.sessions:
-            self.current_resource_key = key
-            self.current_idn = self.sessions[key].get("idn", "")
-            self.sel_label_var.set(self.sessions[key].get("label", ""))
-            self._update_idn_banner()
-
-    def _save_selected_label(self):
-        """Save a label for the selected device."""
-        sel = self.dev_tree.selection()
-        if not sel:
-            messagebox.showinfo("No selection", "Please select a device in the table first.")
-            return
-        key = sel[0]
-        if key not in self.sessions:
-            return
-        new_label = (self.sel_label_var.get() or "").strip()
-        self.sessions[key]["label"] = new_label
-        vals = list(self.dev_tree.item(key, "values"))
-        if len(vals) == 3:
-            vals[2] = new_label
-            self.dev_tree.item(key, values=vals)
-        if key == self.current_resource_key:
-            self._update_idn_banner()
-
-    # ---------- connection ----------
+    # ---------------------- VISA / Connection ----------------------
     def scan_resources(self):
-        """Scan VISA resources."""
         try:
-            self._busy(True, "Scanning VISA resources...")
             self.rm = self.rm or pyvisa.ResourceManager()
-            self.scanned_resources = list(self.rm.list_resources())
-            if not self.scanned_resources:
+            res = list(self.rm.list_resources())
+            if not res:
                 self.status.set("No VISA resources found.")
-                self.log_line("[SCAN] No VISA resources found.")
+                self._log("[SCAN] No VISA resources found.")
             else:
-                self.status.set(f"Found {len(self.scanned_resources)} resource(s).")
-                self.log_line(f"[SCAN] {len(self.scanned_resources)} resource(s) found:")
-                for r in self.scanned_resources:
-                    self.log_line(f"  - {r}")
+                self.resource_combo["values"] = res
+                self.status.set(f"Found {len(res)} resource(s).")
+                self._log("[SCAN] " + ", ".join(res))
         except Exception as e:
             messagebox.showerror("Scan failed", str(e))
-        finally:
-            self._busy(False, "Ready.")
 
-    def _try_open_serial(self, resource_key):
-        """Attempt robust serial connection."""
-        self.rm = self.rm or pyvisa.ResourceManager()
-        baud_candidates = [115200, 38400, 19200, 9600]
-        term_candidates = [("\r\n", "\n"), ("\n", "\n"), ("\r", "\r"), ("\r\n", "\r\n")]
-
+    def connect_selected(self):
+        sel = trim(self.resource_var.get())
+        if not sel:
+            messagebox.showinfo("No resource", "Select a VISA resource first.")
+            return
         try:
-            inst = self.rm.open_resource(resource_key)
+            self.rm = self.rm or pyvisa.ResourceManager()
+            self._log(f"[CONNECT] Opening {sel} ...")
+
+            idn = ""
+            inst = None
+
+            if sel.upper().startswith("ASRL"):
+                # Robust serial open using multiple presets
+                inst, idn = self._open_serial_robust(sel)
+                if inst is None:
+                    raise RuntimeError("Failed to open ASRL with common presets. Check baud/terminations/flow control.")
+                self._log("[ASRL] Connected using robust preset search.")
+            else:
+                # GPIB/USB/LAN: simpler path
+                inst = self.rm.open_resource(sel, access_mode=pv.AccessModes.no_lock, open_timeout=5000)
+                try:
+                    inst.timeout = 1500
+                    inst.write_timeout = 1500
+                    if hasattr(inst, "read_termination"):
+                        inst.read_termination = "\n"
+                    if hasattr(inst, "write_termination"):
+                        inst.write_termination = "\n"
+                except Exception:
+                    pass
+                try:
+                    idn = inst.query("*IDN?").strip()
+                except Exception:
+                    idn = ""
+
+            self.inst = inst
+            self.connected_resource = sel
+            self.idn_label.config(text=f"[IDN] {idn or '(no response)'}  ({sel})")
+            self._log(f"[CONNECT] Connected {sel}  IDN: {idn or '(no response)'}")
+            self.status.set("Connected.")
+        except pyvisa.errors.VisaIOError as e:
+            messagebox.showerror("Connect failed", f"{type(e).__name__}: {e}")
+            self.status.set("Connect failed.")
+        except Exception as e:
+            messagebox.showerror("Connect failed", str(e))
+            self.status.set("Connect failed.")
+
+    def _open_serial_robust(self, resource_key):
+        """Open an ASRL resource and try common serial baud/termination combos.
+        Returns (inst, idn_str) or (None, "").
+        Based on user's reference implementation.
+        """
+        try:
+            inst = (self.rm or pyvisa.ResourceManager()).open_resource(
+                resource_key,
+                access_mode=pv.AccessModes.no_lock,
+                open_timeout=5000,
+            )
         except Exception:
             return None, ""
 
+        # Baseline sane defaults
         try:
             inst.timeout = 500
             inst.write_timeout = 500
-            inst.data_bits = 8
-            inst.parity = getattr(pv.Parity, "none", 0)
-            inst.stop_bits = getattr(pv.StopBits, "one", 10)
+            if hasattr(inst, "data_bits"):
+                inst.data_bits = 8
+            if hasattr(inst, "parity"):
+                inst.parity = getattr(pv.Parity, "none", 0)
+            if hasattr(inst, "stop_bits"):
+                inst.stop_bits = getattr(pv.StopBits, "one", 10)
             if hasattr(inst, "rtscts"):
                 inst.rtscts = False
             if hasattr(inst, "xonxoff"):
                 inst.xonxoff = False
         except Exception:
             pass
+
+        baud_candidates = [115200, 38400, 19200, 9600]
+        term_candidates = [("\r\n", "\n"), ("\n", "\n"), ("\r", "\r"), ("\r\n", "\r\n")]
+        probes = ["*IDN?", "IDN?", "SYST:VERS?", "VER?"]
 
         for baud in baud_candidates:
             try:
@@ -194,84 +207,137 @@ class GUI(tk.Tk):
                         inst.write_termination = wterm
                     if hasattr(inst, "read_termination"):
                         inst.read_termination = rterm
+
+                    # Clear buffers and give it a tick
                     try:
-                        inst.write("")
+                        inst.clear()
                     except Exception:
                         pass
-                    try:
-                        idn = inst.query("*IDN?").strip()
-                    except Exception:
-                        idn = ""
-                    if idn:
-                        return DeviceShell(inst), idn
+                    time.sleep(0.05)
+
+                    # Try several probes; use write/read to avoid hanging query semantics
+                    for q in probes:
+                        try:
+                            inst.write(q)
+                            time.sleep(0.05)
+                            resp = inst.read().strip()
+                            if resp:
+                                self._log(f"[ASRL] Working preset: baud={baud}, write_term={repr(wterm)}, read_term={repr(rterm)}; probe={q} -> {resp}")
+                                return inst, resp
+                        except Exception:
+                            continue
                 except Exception:
                     continue
 
+        # No joy
         try:
             inst.close()
         except Exception:
             pass
         return None, ""
 
-    def connect_all(self):
-        """Connect to all scanned VISA resources."""
-        if not self.scanned_resources:
-            messagebox.showinfo("Nothing to connect", "Scan resources first.")
+    def disconnect(self):
+        try:
+            if self.inst:
+                res = self.connected_resource or "(unknown)"
+                self.inst.close()
+                self.inst = None
+                self.connected_resource = None
+                self._log(f"[DISCONNECT] Closed {res}")
+                self.idn_label.config(text="[IDN] - Not connected")
+                self.status.set("Disconnected.")
+            else:
+                self.status.set("Nothing to disconnect.")
+        except Exception as e:
+            messagebox.showerror("Disconnect failed", str(e))
+
+    def _check_connected(self):
+        if not self.inst:
+            messagebox.showinfo("Not connected", "Connect to a VISA resource first.")
+            return False
+        return True
+
+    # -------------------------- Command I/O -------------------------
+    def _format_selected_command(self, for_query: bool) -> str:
+        tpl = trim(self.cmd_var.get())
+        param = trim(self.param_var.get())
+        if "{param}" in tpl:
+            if not param and not tpl.endswith("?"):
+                self._log("[WARN] No parameter provided; sending without value.")
+            cmd = tpl.replace("{param}", param)
+        else:
+            cmd = tpl if (for_query or not param) else f"{tpl} {param}"
+        if for_query and not cmd.endswith("?"):
+            base_up = cmd.upper().split(" ")[0]
+            if base_up in QUERYABLE_BASES:
+                cmd = cmd + "?"
+        return cmd
+
+    def do_write(self):
+        if not self._check_connected():
             return
-        self._busy(True, "Connecting to all scanned instruments...")
-        connected_count = 0
+        cmd = self._format_selected_command(False)
+        if cmd.endswith("?"):
+            messagebox.showinfo("Use Query", "This looks like a query. Use the Query button.")
+            return
+        try:
+            self.inst.write(cmd)
+            self._log(f"[WRITE] {cmd}")
+        except Exception as e:
+            messagebox.showerror("Write failed", str(e))
 
-        for resource_key in self.scanned_resources:
-            if resource_key in self.sessions:
-                continue
+    def do_query(self):
+        if not self._check_connected():
+            return
+        cmd = self._format_selected_command(True)
+        if not cmd.endswith("?"):
+            messagebox.showinfo("Not a query", "This command is not a query.")
+            return
+        try:
+            resp = self.inst.query(cmd).strip()
+            self._log(f"[QUERY] {cmd} -> {resp}")
+        except Exception as e:
+            messagebox.showerror("Query failed", str(e))
 
-            try:
-                if resource_key.upper().startswith("ASRL"):
-                    dev, idn = self._try_open_serial(resource_key)
-                    if dev is None:
-                        self.log_line(f"[ERROR] Failed to connect {resource_key}: no response on serial.")
-                        continue
-                else:
-                    self.rm = self.rm or pyvisa.ResourceManager()
-                    inst = self.rm.open_resource(resource_key)
-                    try:
-                        inst.timeout = 1000
-                        inst.write_timeout = 1000
-                        if hasattr(inst, "read_termination"):
-                            inst.read_termination = "\n"
-                        if hasattr(inst, "write_termination"):
-                            inst.write_termination = "\n"
-                    except Exception:
-                        pass
-                    dev = DeviceShell(inst)
-                    try:
-                        idn = inst.query("*IDN?").strip()
-                    except Exception:
-                        idn = ""
+    # ---------------------- Custom SCPI line ------------------------
+    def custom_write(self):
+        if not self._check_connected():
+            return
+        cmd = trim(self.custom_var.get())
+        if not cmd:
+            messagebox.showinfo("No command", "Enter a custom SCPI command.")
+            return
+        if cmd.endswith("?"):
+            messagebox.showinfo("Use Query", "Custom command ends with '?'. Use the Query (custom) button.")
+            return
+        try:
+            self.inst.write(cmd)
+            self._log(f"[WRITE] {cmd}")
+        except Exception as e:
+            messagebox.showerror("Write failed", str(e))
 
-                self.sessions[resource_key] = {
-                    "inst": dev,
-                    "idn": idn,
-                    "label": "",
-                }
-                self.dev_tree.insert("", "end", iid=resource_key, values=(resource_key, idn, ""))
-                self.log_line(f"[INFO] Connected: {idn} ({resource_key})")
-                connected_count += 1
+    def custom_query(self):
+        if not self._check_connected():
+            return
+        cmd = trim(self.custom_var.get())
+        if not cmd:
+            messagebox.showinfo("No command", "Enter a custom SCPI command.")
+            return
+        if not cmd.endswith("?"):
+            messagebox.showinfo("Not a query", "Custom query must end with '?'.")
+            return
+        try:
+            resp = self.inst.query(cmd).strip()
+            self._log(f"[QUERY] {cmd} -> {resp}")
+        except Exception as e:
+            messagebox.showerror("Query failed", str(e))
 
-            except Exception as e:
-                self.log_line(f"[ERROR] Failed to connect {resource_key}: {e}")
-
-        if connected_count and not self.current_resource_key:
-            first = self.dev_tree.get_children()
-            if first:
-                self.dev_tree.selection_set(first[0])
-                self.dev_tree.focus(first[0])
-                self._on_tree_selection()
-
-        self.status.set(f"Connected {connected_count} device(s).")
-        self._busy(False, "Ready.")
+    # --------------------------- Logging ----------------------------
+    def _log(self, msg: str):
+        self.log.insert("end", msg + "\n")
+        self.log.see("end")
 
 
 if __name__ == "__main__":
-    app = GUI()
+    app = GeneralSCPIGUI()
     app.mainloop()

@@ -1,85 +1,177 @@
-# connection_core.py
-# Purpose: Scan VISA resources and connect to each device without any GUI or simulation.
-# Notes:
-# - Comments are written in English only (as requested).
-# - No HMP4040-specific references or logic.
-# - No simulation mode.
-# - Prints results to stdout.
-# - Robust serial (ASRL) probing is included.
+# connection_gui.py
+# Purpose: Minimal VISA Scan & Connect GUI without simulation mode or device-specific references.
 
-import sys
-from typing import Dict, Tuple, List, Optional
-
+import tkinter as tk
+from tkinter import ttk, messagebox
 import pyvisa
-from pyvisa import constants as pv  # parity/stopbits enums
+from pyvisa import constants as pv  # parity/stopbits constants
 
 
-class VisaDevice:
-    """Lightweight holder for a PyVISA instrument. Extend as needed."""
+class DeviceShell:
+    """Lightweight holder for a PyVISA instrument."""
     def __init__(self, pyvisa_instr):
         self.inst = pyvisa_instr
 
-    def idn(self) -> str:
-        """Query *IDN?; return empty string on failure."""
-        try:
-            return self.inst.query("*IDN?").strip()
-        except Exception:
-            return ""
 
-    def close(self):
-        """Close the underlying VISA resource."""
-        try:
-            self.inst.close()
-        except Exception:
-            pass
-
-
-class VisaConnector:
-    """Core scanner/connector with no UI and no simulation."""
+class GUI(tk.Tk):
     def __init__(self):
-        self.rm: Optional[pyvisa.ResourceManager] = None
-        self.scanned_resources: List[str] = []
-        self.sessions: Dict[str, Dict] = {}
+        super().__init__()
+        self.title("VISA Scan & Connect")
+        self.geometry("900x520")
 
-    # -------- scanning --------
-    def scan_resources(self) -> List[str]:
-        """Scan VISA resources and store the result."""
+        self.rm = None
+        self.sessions = {}
+        self.scanned_resources = []
+        self.current_resource_key = None
+        self.current_idn = None
+        self.sel_label_var = tk.StringVar(value="")
+
+        self._build_ui()
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        # Connection toolbar
+        topbar = ttk.LabelFrame(self, text="Connection")
+        topbar.pack(fill="x", padx=10, pady=(10, 0))
+
+        ttk.Button(topbar, text="Scan", command=self.scan_resources).grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        ttk.Button(topbar, text="Connect All", command=self.connect_all).grid(row=0, column=1, padx=6, pady=6, sticky="w")
+
+        self.idn_label = ttk.Label(topbar, text="[IDN] - Not connected")
+        self.idn_label.grid(row=0, column=2, padx=6, pady=6, sticky="w")
+
+        # Devices table
+        devf = ttk.LabelFrame(self, text="Devices (scanned & connected)")
+        devf.pack(fill="both", expand=False, padx=10, pady=(10, 10))
+
+        columns = ("resource", "idn", "label")
+        self.dev_tree = ttk.Treeview(devf, columns=columns, show="headings", height=7)
+        self.dev_tree.heading("resource", text="VISA Resource")
+        self.dev_tree.heading("idn", text="IDN")
+        self.dev_tree.heading("label", text="Label")
+        self.dev_tree.column("resource", width=250, anchor="w")
+        self.dev_tree.column("idn", width=350, anchor="w")
+        self.dev_tree.column("label", width=200, anchor="w")
+        self.dev_tree.pack(fill="both", expand=True, padx=6, pady=(6, 0))
+        self.dev_tree.bind("<<TreeviewSelect>>", self._on_tree_selection)
+
+        # Label editor
+        editor = ttk.Frame(devf)
+        editor.pack(fill="x", padx=6, pady=(6, 6))
+        ttk.Label(editor, text="Label for selected:").grid(row=0, column=0, padx=(0, 6), pady=4, sticky="e")
+        self.sel_label_entry = ttk.Entry(editor, textvariable=self.sel_label_var, width=40)
+        self.sel_label_entry.grid(row=0, column=1, padx=(0, 6), pady=4, sticky="we")
+        ttk.Button(editor, text="Save Label", command=self._save_selected_label).grid(row=0, column=2, padx=6, pady=4)
+        editor.grid_columnconfigure(1, weight=1)
+
+        # Log section
+        logf = ttk.LabelFrame(self, text="Log")
+        logf.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        log_toolbar = ttk.Frame(logf)
+        log_toolbar.pack(fill="x", padx=6, pady=(6, 0))
+        ttk.Button(log_toolbar, text="Clear Log", command=self.clear_log).pack(side="right")
+
+        self.log = tk.Text(logf, height=12)
+        self.log.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # Status bar
+        self.status = tk.StringVar(value="Ready.")
+        ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w").pack(fill="x")
+
+    # ---------- helpers ----------
+    def _busy(self, on=True, msg=None):
+        """Set busy cursor and optional status message."""
+        self.config(cursor="watch" if on else "")
+        if msg:
+            self.status.set(msg)
+        self.update_idletasks()
+
+    def log_line(self, msg: str):
+        """Append a line to the log text box."""
+        self.log.insert("end", msg + "\n")
+        self.log.see("end")
+
+    def clear_log(self):
+        """Clear the log and update status."""
+        self.log.delete("1.0", "end")
+        self.status.set("Log cleared.")
+
+    def _update_idn_banner(self):
+        """Update the IDN banner for the selected device."""
+        if self.current_resource_key and self.current_resource_key in self.sessions:
+            info = self.sessions[self.current_resource_key]
+            label = info.get("label") or ""
+            idn = info.get("idn") or ""
+            base = f"[IDN] {idn} ({self.current_resource_key})"
+            self.idn_label.config(text=(f"{label} | {base}" if label else base))
+        else:
+            self.idn_label.config(text="[IDN] - Not connected")
+
+    def _on_tree_selection(self, event=None):
+        """Handle device selection in the tree."""
+        sel = self.dev_tree.selection()
+        if not sel:
+            return
+        key = sel[0]
+        if key in self.sessions:
+            self.current_resource_key = key
+            self.current_idn = self.sessions[key].get("idn", "")
+            self.sel_label_var.set(self.sessions[key].get("label", ""))
+            self._update_idn_banner()
+
+    def _save_selected_label(self):
+        """Save a label for the selected device."""
+        sel = self.dev_tree.selection()
+        if not sel:
+            messagebox.showinfo("No selection", "Please select a device in the table first.")
+            return
+        key = sel[0]
+        if key not in self.sessions:
+            return
+        new_label = (self.sel_label_var.get() or "").strip()
+        self.sessions[key]["label"] = new_label
+        vals = list(self.dev_tree.item(key, "values"))
+        if len(vals) == 3:
+            vals[2] = new_label
+            self.dev_tree.item(key, values=vals)
+        if key == self.current_resource_key:
+            self._update_idn_banner()
+
+    # ---------- connection ----------
+    def scan_resources(self):
+        """Scan VISA resources."""
         try:
+            self._busy(True, "Scanning VISA resources...")
             self.rm = self.rm or pyvisa.ResourceManager()
             self.scanned_resources = list(self.rm.list_resources())
-            return self.scanned_resources
+            if not self.scanned_resources:
+                self.status.set("No VISA resources found.")
+                self.log_line("[SCAN] No VISA resources found.")
+            else:
+                self.status.set(f"Found {len(self.scanned_resources)} resource(s).")
+                self.log_line(f"[SCAN] {len(self.scanned_resources)} resource(s) found:")
+                for r in self.scanned_resources:
+                    self.log_line(f"  - {r}")
         except Exception as e:
-            print(f"[SCAN][ERROR] {e}", file=sys.stderr)
-            self.scanned_resources = []
-            return self.scanned_resources
+            messagebox.showerror("Scan failed", str(e))
+        finally:
+            self._busy(False, "Ready.")
 
-    # -------- connection helpers --------
-    def _try_open_serial(self, resource_key: str) -> Tuple[Optional[VisaDevice], str]:
-        """
-        Attempt to open an ASRL resource by sweeping common baud rates and terminations.
-        Returns (VisaDevice, idn) on success, (None, "") on failure.
-        """
+    def _try_open_serial(self, resource_key):
+        """Attempt robust serial connection."""
         self.rm = self.rm or pyvisa.ResourceManager()
-
-        # Common serial settings to probe
         baud_candidates = [115200, 38400, 19200, 9600]
         term_candidates = [("\r\n", "\n"), ("\n", "\n"), ("\r", "\r"), ("\r\n", "\r\n")]
 
-        # Try opening quickly; some adapters can block on initial open
         try:
             inst = self.rm.open_resource(resource_key)
         except Exception:
             return None, ""
 
-        # Use short timeouts to accelerate probing
         try:
             inst.timeout = 500
             inst.write_timeout = 500
-        except Exception:
-            pass
-
-        # Typical serial framing; ignore if backend does not expose attributes
-        try:
             inst.data_bits = 8
             inst.parity = getattr(pv.Parity, "none", 0)
             inst.stop_bits = getattr(pv.StopBits, "one", 10)
@@ -90,81 +182,58 @@ class VisaConnector:
         except Exception:
             pass
 
-        # Try to clear buffers
-        try:
-            inst.clear()
-        except Exception:
-            pass
-
         for baud in baud_candidates:
             try:
                 if hasattr(inst, "baud_rate"):
                     inst.baud_rate = baud
             except Exception:
                 pass
-
             for wterm, rterm in term_candidates:
                 try:
                     if hasattr(inst, "write_termination"):
                         inst.write_termination = wterm
                     if hasattr(inst, "read_termination"):
                         inst.read_termination = rterm
-
-                    # Nudge device if needed
                     try:
                         inst.write("")
                     except Exception:
                         pass
-
-                    # Probe *IDN?
                     try:
                         idn = inst.query("*IDN?").strip()
                     except Exception:
                         idn = ""
-
                     if idn:
-                        return VisaDevice(inst), idn
+                        return DeviceShell(inst), idn
                 except Exception:
-                    # Move to next combination
                     continue
 
-        # Give up and close
         try:
             inst.close()
         except Exception:
             pass
         return None, ""
 
-    # -------- connect-all --------
-    def connect_all(self) -> int:
-        """
-        Connect to all scanned resources and query *IDN?.
-        Stores live sessions in self.sessions.
-        Returns the count of successful connections.
-        """
+    def connect_all(self):
+        """Connect to all scanned VISA resources."""
         if not self.scanned_resources:
-            print("[CONNECT] No resources to connect. Run scan_resources() first.", file=sys.stderr)
-            return 0
-
+            messagebox.showinfo("Nothing to connect", "Scan resources first.")
+            return
+        self._busy(True, "Connecting to all scanned instruments...")
         connected_count = 0
 
         for resource_key in self.scanned_resources:
             if resource_key in self.sessions:
-                # Already connected
                 continue
 
             try:
                 if resource_key.upper().startswith("ASRL"):
-                    # Serial-specific probing
                     dev, idn = self._try_open_serial(resource_key)
                     if dev is None:
-                        print(f"[CONNECT][ERROR] {resource_key}: no response on serial (tried common settings)")
+                        self.log_line(f"[ERROR] Failed to connect {resource_key}: no response on serial.")
                         continue
                 else:
-                    # USB/GPIB/TCPIP etc. Typical defaults generally work
                     self.rm = self.rm or pyvisa.ResourceManager()
                     inst = self.rm.open_resource(resource_key)
-
                     try:
                         inst.timeout = 1000
                         inst.write_timeout = 1000
@@ -172,63 +241,37 @@ class VisaConnector:
                             inst.read_termination = "\n"
                         if hasattr(inst, "write_termination"):
                             inst.write_termination = "\n"
-                        try:
-                            inst.clear()
-                        except Exception:
-                            pass
                     except Exception:
                         pass
-
-                    dev = VisaDevice(inst)
-                    idn = dev.idn()
+                    dev = DeviceShell(inst)
+                    try:
+                        idn = inst.query("*IDN?").strip()
+                    except Exception:
+                        idn = ""
 
                 self.sessions[resource_key] = {
-                    "device": dev,
+                    "inst": dev,
                     "idn": idn,
+                    "label": "",
                 }
-                print(f"[CONNECT][OK] {resource_key} -> {idn if idn else '(no IDN response)'}")
+                self.dev_tree.insert("", "end", iid=resource_key, values=(resource_key, idn, ""))
+                self.log_line(f"[INFO] Connected: {idn} ({resource_key})")
                 connected_count += 1
 
             except Exception as e:
-                print(f"[CONNECT][ERROR] {resource_key}: {e}", file=sys.stderr)
+                self.log_line(f"[ERROR] Failed to connect {resource_key}: {e}")
 
-        return connected_count
+        if connected_count and not self.current_resource_key:
+            first = self.dev_tree.get_children()
+            if first:
+                self.dev_tree.selection_set(first[0])
+                self.dev_tree.focus(first[0])
+                self._on_tree_selection()
 
-    # -------- teardown --------
-    def close_all(self):
-        """Close all live VISA sessions."""
-        for key, sess in list(self.sessions.items()):
-            try:
-                dev: VisaDevice = sess.get("device")
-                if dev:
-                    dev.close()
-            except Exception:
-                pass
-        self.sessions.clear()
-
-
-def main():
-    """CLI entry point: scan, list, connect, and print results."""
-    vc = VisaConnector()
-
-    print("[SCAN] Listing VISA resources...")
-    resources = vc.scan_resources()
-    if not resources:
-        print("[SCAN] No VISA resources found.")
-        return
-
-    for r in resources:
-        print(f"  - {r}")
-
-    print("\n[CONNECT] Opening all resources and querying *IDN? ...")
-    count = vc.connect_all()
-    print(f"[CONNECT] Completed. Connected {count} device(s).")
-
-    # Optional: keep the process alive if you need to interact further.
-    # For now, we close immediately.
-    vc.close_all()
-    print("[CLOSE] All sessions closed.")
+        self.status.set(f"Connected {connected_count} device(s).")
+        self._busy(False, "Ready.")
 
 
 if __name__ == "__main__":
-    main()
+    app = GUI()
+    app.mainloop()

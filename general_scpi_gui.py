@@ -5,10 +5,13 @@
 # - Choose a general SCPI command from a list (e.g., *IDN?, *CLS, *RST, *OPC?, *WAI, *TST?, *ESE, *ESR?, *SRE, *STB?, SYST:ERR?)
 # - Optional parameter field for commands that take a value (e.g., *ESE, *SRE)
 # - Write and Query buttons
+# - Custom SCPI line
 # - Log window
 # - Synchronous (no threading/asyncio)
 # - Graceful handling for serial (ASRL) ports and VI_ERROR_RSRC_BUSY
+# - NEW: Auto-detect common serial presets (baud/data/parity/stop/EOL) + alternative ID probes
 
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 import pyvisa
@@ -16,7 +19,7 @@ from pyvisa import constants as pv
 
 # ----------------------------- Helpers -----------------------------
 
-def trim(s):
+def trim(s: str) -> str:
     return (s or "").strip()
 
 # A small registry of commands. If a command needs a parameter, include a
@@ -44,7 +47,7 @@ class GeneralSCPIGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("General SCPI GUI (PyVISA)")
-        self.geometry("980x640")
+        self.geometry("980x680")
 
         self.rm = None
         self.inst = None
@@ -61,7 +64,7 @@ class GeneralSCPIGUI(tk.Tk):
         ttk.Button(conn, text="Scan VISA", command=self.scan_resources).grid(row=0, column=0, padx=6, pady=8)
         ttk.Label(conn, text="Resource:").grid(row=0, column=1, padx=(12, 6), pady=8, sticky="e")
         self.resource_var = tk.StringVar()
-        self.resource_combo = ttk.Combobox(conn, textvariable=self.resource_var, width=40, state="readonly")
+        self.resource_combo = ttk.Combobox(conn, textvariable=self.resource_var, width=42, state="readonly")
         self.resource_combo.grid(row=0, column=2, padx=(0, 6), pady=8, sticky="w")
 
         ttk.Button(conn, text="Connect", command=self.connect_selected).grid(row=0, column=3, padx=6, pady=8)
@@ -103,7 +106,7 @@ class GeneralSCPIGUI(tk.Tk):
         # Log block
         logf = ttk.LabelFrame(self, text="Log")
         logf.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.log = tk.Text(logf, height=16)
+        self.log = tk.Text(logf, height=18)
         self.log.pack(fill="both", expand=True, padx=6, pady=6)
 
         # Status bar
@@ -143,36 +146,50 @@ class GeneralSCPIGUI(tk.Tk):
             try:
                 inst.timeout = 3000
                 if hasattr(inst, "read_termination"):
-                    inst.read_termination = "\n"
+                    inst.read_termination = "
+"
                 if hasattr(inst, "write_termination"):
-                    inst.write_termination = "\n"
+                    inst.write_termination = "
+"
             except Exception:
                 pass
 
             # Serial-specific sane defaults (best-effort)
             if sel.upper().startswith("ASRL"):
                 try:
-                    if hasattr(inst, "baud_rate") and inst.baud_rate is None:
+                    if hasattr(inst, "baud_rate") and (inst.baud_rate is None or inst.baud_rate == 0):
                         inst.baud_rate = 9600
-                    if hasattr(inst, "stop_bits") and inst.stop_bits is None:
-                        inst.stop_bits = pv.StopBits.one
+                    if hasattr(inst, "data_bits") and (inst.data_bits is None or inst.data_bits == 0):
+                        inst.data_bits = 8
                     if hasattr(inst, "parity") and inst.parity is None:
                         inst.parity = pv.Parity.none
-                    if hasattr(inst, "data_bits") and inst.data_bits is None:
-                        inst.data_bits = 8
+                    if hasattr(inst, "stop_bits") and inst.stop_bits is None:
+                        inst.stop_bits = pv.StopBits.one
                     if hasattr(inst, "read_termination"):
-                        inst.read_termination = "\n"
+                        inst.read_termination = "
+"
                     if hasattr(inst, "write_termination"):
-                        inst.write_termination = "\n"
+                        inst.write_termination = "
+"
                 except Exception:
                     pass
 
-            # Probe *IDN?
+            # Probe *IDN? first using query; if no response, try auto serial presets
             idn = ""
             try:
                 idn = inst.query("*IDN?").strip()
             except Exception:
-                pass
+                idn = ""
+
+            # Auto-detect for ASRL if initial probe failed or empty
+            if sel.upper().startswith("ASRL") and not idn:
+                ok, id_guess, chosen = self._try_serial_presets(inst)
+                if ok:
+                    self._log(f"[ASRL] Found working preset: {chosen}")
+                    self._log(f"[ASRL] Probe response: {id_guess}")
+                    idn = id_guess
+                else:
+                    self._log("[ASRL] No response to common probes. Check baud/format/terminations and command set.")
 
             self.inst = inst
             self.connected_resource = sel
@@ -185,10 +202,18 @@ class GeneralSCPIGUI(tk.Tk):
                 messagebox.showerror(
                     "Resource Busy",
                     (
-                        "VISA reports the resource is busy:\n\n"
-                        f"{sel}\n\n"
-                        "Another application may be holding the port.\n\n"
-                        "Close the other app or click Disconnect there, then try again.\n\n"
+                        "VISA reports the resource is busy:
+
+"
+                        f"{sel}
+
+"
+                        "Another application may be holding the port.
+
+"
+                        "Close the other app or click Disconnect there, then try again.
+
+"
                         "Tip: Use this GUI's Disconnect button when done to free the port."
                     ),
                 )
@@ -216,14 +241,75 @@ class GeneralSCPIGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("Disconnect failed", str(e))
 
-    def _check_connected(self):
+    def _check_connected(self) -> bool:
         if self.inst is None:
             messagebox.showinfo("Not connected", "Connect to a VISA resource first.")
             return False
         return True
 
+    # --------------------- Auto serial preset logic -----------------
+    def _try_serial_presets(self, inst):
+        """Cycle a few common RS-232 presets & terminations, probe for an ID string.
+        Returns (ok, id_text, chosen_preset_dict).
+        Also logs within this method for transparency.
+        """
+        presets = [
+            dict(baud_rate=9600,  data_bits=8, parity=pv.Parity.none, stop_bits=pv.StopBits.one, write_termination="
+", read_termination="
+", label="9600 8N1 CRLF/
+"),
+            dict(baud_rate=9600,  data_bits=8, parity=pv.Parity.none, stop_bits=pv.StopBits.one, write_termination="
+",   read_termination="
+", label="9600 8N1 CR/CR"),
+            dict(baud_rate=9600,  data_bits=8, parity=pv.Parity.none, stop_bits=pv.StopBits.one, write_termination="
+",   read_termination="
+", label="9600 8N1 LF/LF"),
+            dict(baud_rate=19200, data_bits=8, parity=pv.Parity.none, stop_bits=pv.StopBits.one, write_termination="
+", read_termination="
+", label="19200 8N1 CRLF/
+"),
+            # Some legacy instruments (HP/Agilent) use 7E1
+            dict(baud_rate=9600,  data_bits=7, parity=pv.Parity.even, stop_bits=pv.StopBits.one, write_termination="
+", read_termination="
+", label="9600 7E1 CRLF/
+"),
+        ]
+
+        probes = ["*IDN?", "IDN?", "SYST:VERS?", "VER?"]
+
+        for idx, p in enumerate(presets, 1):
+            try:
+                self._log(f"[ASRL] Trying preset {idx}: {p['label']}")
+                if hasattr(inst, "baud_rate"):     inst.baud_rate = p["baud_rate"]
+                if hasattr(inst, "data_bits"):     inst.data_bits = p["data_bits"]
+                if hasattr(inst, "parity"):        inst.parity = p["parity"]
+                if hasattr(inst, "stop_bits"):     inst.stop_bits = p["stop_bits"]
+                if hasattr(inst, "read_termination"):  inst.read_termination  = p["read_termination"]
+                if hasattr(inst, "write_termination"): inst.write_termination = p["write_termination"]
+
+                # Clear buffers and give the device a brief moment
+                try:
+                    inst.clear()
+                except Exception:
+                    pass
+                time.sleep(0.12)
+
+                for q in probes:
+                    try:
+                        # Use explicit write/read to avoid blocking if not query-safe
+                        inst.write(q)
+                        time.sleep(0.06)
+                        resp = inst.read().strip()
+                        if resp:
+                            return True, resp, p["label"]
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        return False, "", None
+
     # -------------------------- Command I/O -------------------------
-    def _format_selected_command(self, for_query: bool):
+    def _format_selected_command(self, for_query: bool) -> str:
         """Return the command string built from the selected template and param.
         If for_query is True and the base command is queryable, ensure it ends with '?'.
         """
@@ -234,7 +320,6 @@ class GeneralSCPIGUI(tk.Tk):
         if "{param}" in tpl:
             if not param and not tpl.endswith("?"):
                 # SCPI writes that require a parameter should have one.
-                # We'll allow empty (some instruments accept defaults), but warn in log.
                 self._log("[WARN] No parameter provided; sending without value.")
             cmd = tpl.replace("{param}", param)
         else:
@@ -242,12 +327,9 @@ class GeneralSCPIGUI(tk.Tk):
             cmd = tpl if (for_query or not param) else f"{tpl} {param}"
 
         if for_query:
-            # If it's already a query, keep as-is
             if cmd.endswith("?"):
                 return cmd
-            # If base looks queryable, append '?'
             base = cmd.rstrip().rstrip("?")
-            # Strip any trailing number/param to check base
             base_up = base.upper().split(" ")[0]
             if base_up in QUERYABLE_BASES:
                 cmd = base + "?"
@@ -272,7 +354,6 @@ class GeneralSCPIGUI(tk.Tk):
             return
         cmd = self._format_selected_command(for_query=True)
         if not cmd.endswith("?"):
-            # Not a query; refuse to prevent timeouts
             messagebox.showinfo("Not a query", "This command is not a query. Add '?' or choose a query.")
             return
         try:
@@ -317,7 +398,8 @@ class GeneralSCPIGUI(tk.Tk):
 
     # --------------------------- Logging ----------------------------
     def _log(self, msg: str):
-        self.log.insert("end", msg + "\n")
+        self.log.insert("end", msg + "
+")
         self.log.see("end")
 
 

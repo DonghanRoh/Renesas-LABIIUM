@@ -6,7 +6,7 @@
 # - Param field for commands needing a value (e.g., *ESE, *SRE)
 # - Custom SCPI write/query
 # - Log window
-# - Robust serial open based on user's reference (tries common baud/EOL combos)
+# - Robust serial open: tries multiple baud/data/parity/stop/EOL/flow presets and alternate probe commands
 
 import time
 import tkinter as tk
@@ -40,7 +40,7 @@ class GeneralSCPIGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("General SCPI GUI (PyVISA)")
-        self.geometry("980x700")
+        self.geometry("980x720")
         self.rm = None
         self.inst = None
         self.connected_resource = None
@@ -163,7 +163,6 @@ class GeneralSCPIGUI(tk.Tk):
     def _open_serial_robust(self, resource_key):
         """Open an ASRL resource and try common serial baud/termination combos.
         Returns (inst, idn_str) or (None, "").
-        Based on user's reference implementation.
         """
         try:
             inst = (self.rm or pyvisa.ResourceManager()).open_resource(
@@ -176,14 +175,14 @@ class GeneralSCPIGUI(tk.Tk):
 
         # Baseline sane defaults
         try:
-            inst.timeout = 500
-            inst.write_timeout = 500
+            inst.timeout = 600
+            inst.write_timeout = 600
             if hasattr(inst, "data_bits"):
                 inst.data_bits = 8
             if hasattr(inst, "parity"):
-                inst.parity = getattr(pv.Parity, "none", 0)
+                inst.parity = pv.Parity.none
             if hasattr(inst, "stop_bits"):
-                inst.stop_bits = getattr(pv.StopBits, "one", 10)
+                inst.stop_bits = pv.StopBits.one
             if hasattr(inst, "rtscts"):
                 inst.rtscts = False
             if hasattr(inst, "xonxoff"):
@@ -191,43 +190,98 @@ class GeneralSCPIGUI(tk.Tk):
         except Exception:
             pass
 
-        baud_candidates = [115200, 38400, 19200, 9600]
+        baud_candidates = [115200, 57600, 38400, 19200, 9600, 4800]
+        # (write_termination, read_termination)
         term_candidates = [("\r\n", "\n"), ("\n", "\n"), ("\r", "\r"), ("\r\n", "\r\n")]
+        # (data_bits, parity, stop_bits)
+        frame_candidates = [
+            (8, pv.Parity.none, pv.StopBits.one),  # 8N1
+            (7, pv.Parity.even, pv.StopBits.one),  # 7E1 (legacy HP/Agilent)
+            (7, pv.Parity.odd, pv.StopBits.one),   # 7O1 (some older gear)
+        ]
+        # flow control options to try (if supported by backend)
+        flow_candidates = [None, "xonxoff", "rtscts"]
+
         probes = ["*IDN?", "IDN?", "SYST:VERS?", "VER?"]
 
+        def set_flow(inst, mode):
+            try:
+                if mode is None:
+                    if hasattr(inst, "xonxoff"):
+                        inst.xonxoff = False
+                    if hasattr(inst, "rtscts"):
+                        inst.rtscts = False
+                elif mode == "xonxoff" and hasattr(inst, "xonxoff"):
+                    inst.xonxoff = True
+                elif mode == "rtscts" and hasattr(inst, "rtscts"):
+                    inst.rtscts = True
+            except Exception:
+                pass
+
         for baud in baud_candidates:
+            # set baud if available
             try:
                 if hasattr(inst, "baud_rate"):
                     inst.baud_rate = baud
             except Exception:
                 pass
-            for wterm, rterm in term_candidates:
+            for db, pr, sb in frame_candidates:
                 try:
-                    if hasattr(inst, "write_termination"):
-                        inst.write_termination = wterm
-                    if hasattr(inst, "read_termination"):
-                        inst.read_termination = rterm
-
-                    # Clear buffers and give it a tick
-                    try:
-                        inst.clear()
-                    except Exception:
-                        pass
-                    time.sleep(0.05)
-
-                    # Try several probes; use write/read to avoid hanging query semantics
-                    for q in probes:
+                    if hasattr(inst, "data_bits"):
+                        inst.data_bits = db
+                    if hasattr(inst, "parity"):
+                        inst.parity = pr
+                    if hasattr(inst, "stop_bits"):
+                        inst.stop_bits = sb
+                except Exception:
+                    pass
+                for wterm, rterm in term_candidates:
+                    for flow in flow_candidates:
+                        set_flow(inst, flow)
                         try:
-                            inst.write(q)
-                            time.sleep(0.05)
-                            resp = inst.read().strip()
-                            if resp:
-                                self._log(f"[ASRL] Working preset: baud={baud}, write_term={repr(wterm)}, read_term={repr(rterm)}; probe={q} -> {resp}")
-                                return inst, resp
+                            if hasattr(inst, "write_termination"):
+                                inst.write_termination = wterm
+                            if hasattr(inst, "read_termination"):
+                                inst.read_termination = rterm
+
+                            # Try to wake the device / clear buffers
+                            try:
+                                inst.clear()
+                            except Exception:
+                                pass
+                            for wake in ("", "\r", "\n"):
+                                try:
+                                    inst.write(wake)
+                                except Exception:
+                                    pass
+                            time.sleep(0.12)
+
+                            # Try probes; prefer explicit write/read to avoid query hang
+                            for q in probes:
+                                try:
+                                    inst.write(q)
+                                    time.sleep(0.08)
+                                    resp = ""
+                                    try:
+                                        resp = inst.read().strip()
+                                    except Exception:
+                                        # Try read_bytes fallback if available
+                                        try:
+                                            if hasattr(inst, "read_bytes"):
+                                                raw = inst.read_bytes(256)
+                                                resp = raw.decode(errors="ignore").strip()
+                                        except Exception:
+                                            resp = ""
+                                    if resp:
+                                        self._log(
+                                            f"[ASRL] Working preset: baud={baud}, frame={db}{pr.name[0].upper()}{int(sb.value)} "
+                                            f"term=({repr(wterm)}, {repr(rterm)}) flow={flow}; probe={q} -> {resp}"
+                                        )
+                                        return inst, resp
+                                except Exception:
+                                    continue
                         except Exception:
                             continue
-                except Exception:
-                    continue
 
         # No joy
         try:

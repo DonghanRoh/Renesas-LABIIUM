@@ -1,5 +1,5 @@
-# Fixed version: corrected string literal issues with newline characters
 # general_scpi_gui.py
+# Fixed version: ensure newline characters are correctly escaped and prevent unintended line breaks in strings
 
 import time
 import tkinter as tk

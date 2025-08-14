@@ -1,4 +1,4 @@
-# hmp4040_gui_all_connect_minimal.py
+# connection_gui.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 

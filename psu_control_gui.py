@@ -1,29 +1,23 @@
 # psu_control_gui.py
-# Purpose: Minimal power-supply control GUI for Keysight E3631A and R&S HMP4040
-# Features: Scan/Connect, per-model controls, Write/Query buttons, generic SCPI box
+# Updated to handle VI_ERROR_RSRC_BUSY on ASRL (serial) resources:
+# - Use AccessModes.no_lock, longer open_timeout, clear error guidance
+# - Add Disconnect button to free the port quickly
+# - Better ASRL setup (terminations/timeouts)
+#
+# Works with HMP4040 and E3631A. Includes Write/Query buttons.
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 import pyvisa
+from pyvisa import constants as pv
 
-# --------------------------- Utility helpers ---------------------------
-
-def safe_float(s, default=None):
-    try:
-        return float(s)
-    except Exception:
-        return default
-
-def trim(s):
-    return (s or "").strip()
-
-# --------------------------- Main GUI ----------------------------------
+def trim(s): return (s or "").strip()
 
 class PSUControlGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("PSU Control (E3631A / HMP4040)")
-        self.geometry("980x640")
+        self.geometry("980x650")
 
         self.rm = None
         self.inst = None  # PyVISA resource
@@ -32,7 +26,7 @@ class PSUControlGUI(tk.Tk):
         self._build_ui()
 
     def _build_ui(self):
-        # Top: connection area
+        # Connection area
         conn = ttk.LabelFrame(self, text="Connection")
         conn.pack(fill="x", padx=10, pady=(10, 6))
 
@@ -45,16 +39,18 @@ class PSUControlGUI(tk.Tk):
         self.resource_var = tk.StringVar()
         self.resource_combo = ttk.Combobox(conn, textvariable=self.resource_var, width=36, state="readonly")
         self.resource_combo.grid(row=0, column=4, padx=(0,6), pady=8, sticky="w")
+
         ttk.Button(conn, text="Connect", command=self.connect_selected).grid(row=0, column=5, padx=6, pady=8)
+        ttk.Button(conn, text="Disconnect", command=self.disconnect).grid(row=0, column=6, padx=6, pady=8)
 
         self.idn_label = ttk.Label(conn, text="[IDN] - Not connected")
-        self.idn_label.grid(row=0, column=6, padx=6, pady=8, sticky="w")
+        self.idn_label.grid(row=1, column=0, columnspan=7, padx=6, pady=(0,8), sticky="w")
 
         for i in range(7):
             conn.grid_columnconfigure(i, weight=0)
         conn.grid_columnconfigure(6, weight=1)
 
-        # Middle: model-specific controls (swap with notebook)
+        # Controls frame (two subframes; we show one at a time)
         self.model_frame = ttk.LabelFrame(self, text="Controls")
         self.model_frame.pack(fill="x", padx=10, pady=(0, 6))
 
@@ -82,7 +78,7 @@ class PSUControlGUI(tk.Tk):
         self.status = tk.StringVar(value="Ready.")
         ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w").pack(fill="x")
 
-    # ----------------------- HMP4040 Controls ---------------------------
+    # ----------------------- HMP4040 controls -----------------------
 
     def _build_hmp4040_controls(self):
         f = ttk.Frame(self.model_frame)
@@ -159,7 +155,6 @@ class PSUControlGUI(tk.Tk):
             self.hmp_ovp_mode.set(ovp)
             self.hmp_output_state.set("ON" if out in ("1","ON") else "OFF")
 
-            # Also show measured values
             meas_v = self.inst.query("MEASure:VOLTage?").strip()
             meas_i = self.inst.query("MEASure:CURRent?").strip()
 
@@ -168,7 +163,7 @@ class PSUControlGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("HMP4040 Query failed", str(e))
 
-    # ----------------------- E3631A Controls ----------------------------
+    # ----------------------- E3631A controls -----------------------
 
     def _build_e3631a_controls(self):
         f = ttk.Frame(self.model_frame)
@@ -205,7 +200,6 @@ class PSUControlGUI(tk.Tk):
             out = self.e36_output.get()
             v = trim(self.e36_volt.get())
             i = trim(self.e36_curr.get())
-            # Apply sets both voltage and current limit
             self.inst.write(f"APPLy {out},{v},{i}")
             self._log(f"[E3631A] APPLy {out},{v},{i}")
             self.status.set("E3631A: Write complete.")
@@ -217,12 +211,10 @@ class PSUControlGUI(tk.Tk):
         try:
             out = self.e36_output.get()
             resp = self.inst.query(f"APPLy? {out}").strip()
-            # Response: "volt,current"
             parts = [p.strip().strip('"') for p in resp.split(",")]
             if len(parts) >= 2:
                 self.e36_volt.set(parts[0])
                 self.e36_curr.set(parts[1])
-            # Query output state if supported
             try:
                 out_state = self.inst.query("OUTPut:STATe?").strip()
                 self.e36_out_state.set("ON" if out_state in ("1","ON") else "OFF")
@@ -243,7 +235,7 @@ class PSUControlGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("E3631A Output toggle failed", str(e))
 
-    # ----------------------- Generic SCPI -------------------------------
+    # ----------------------- Generic SCPI ---------------------------
 
     def generic_write(self):
         if not self._check_connected(): return
@@ -269,7 +261,7 @@ class PSUControlGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("Query failed", str(e))
 
-    # ----------------------- Connection logic ---------------------------
+    # ----------------------- Connection logic ----------------------
 
     def scan_resources(self):
         try:
@@ -292,8 +284,15 @@ class PSUControlGUI(tk.Tk):
             return
         try:
             self.rm = self.rm or pyvisa.ResourceManager()
-            inst = self.rm.open_resource(sel)
-            # Set basic terminations/timeouts
+            # Try no_lock and longer open_timeout (5000 ms)
+            self._log(f"[CONNECT] Opening {sel} with no_lock ...")
+            inst = self.rm.open_resource(
+                sel,
+                access_mode=pv.AccessModes.no_lock,
+                open_timeout=5000
+            )
+
+            # Basic setup
             try:
                 inst.timeout = 2000
                 if hasattr(inst, "read_termination"):
@@ -302,21 +301,75 @@ class PSUControlGUI(tk.Tk):
                     inst.write_termination = "\n"
             except Exception:
                 pass
+
+            # For ASRL specifically, assert sane serial params/terms
+            if sel.upper().startswith("ASRL"):
+                try:
+                    # Some VISA backends expose these; some do not.
+                    if hasattr(inst, "baud_rate") and inst.baud_rate is None:
+                        inst.baud_rate = 9600
+                    if hasattr(inst, "stop_bits") and inst.stop_bits is None:
+                        inst.stop_bits = pv.StopBits.one
+                    if hasattr(inst, "parity") and inst.parity is None:
+                        inst.parity = pv.Parity.none
+                    if hasattr(inst, "data_bits") and inst.data_bits is None:
+                        inst.data_bits = 8
+                    if hasattr(inst, "read_termination"):
+                        inst.read_termination = "\n"
+                    if hasattr(inst, "write_termination"):
+                        inst.write_termination = "\n"
+                except Exception:
+                    pass
+
             # Probe *IDN?
             idn = ""
             try:
                 idn = inst.query("*IDN?").strip()
             except Exception:
-                # not all devices answer; it's okay
                 pass
 
             self.inst = inst
             self.connected_resource = sel
             self.idn_label.config(text=f"[IDN] {idn or '(no response)'}  ({sel})")
-            self._log(f"[CONNECT] {sel}  IDN: {idn}")
+            self._log(f"[CONNECT] Connected {sel}  IDN: {idn or '(no response)'}")
             self.status.set("Connected.")
+        except pyvisa.errors.VisaIOError as e:
+            # Specific handling for resource busy
+            if hasattr(pv, "VI_ERROR_RSRC_BUSY") and e.error_code == pv.VI_ERROR_RSRC_BUSY:
+                self._log(f"[ERROR] VI_ERROR_RSRC_BUSY on {sel}")
+                messagebox.showerror(
+                    "Resource Busy",
+                    (
+                        "VISA reports the resource is busy:\n\n"
+                        f"{sel}\n\n"
+                        "Another application (likely your first GUI) is holding the serial port.\n\n"
+                        "Close the other app or Disconnect it from this port, then click Connect again.\n\n"
+                        "Tip: Use this GUI’s Disconnect button when done to free the port."
+                    )
+                )
+            else:
+                messagebox.showerror("Connect failed", f"{type(e).__name__}: {e}")
+            self.status.set("Connect failed.")
         except Exception as e:
             messagebox.showerror("Connect failed", str(e))
+            self.status.set("Connect failed.")
+
+    def disconnect(self):
+        try:
+            if self.inst is not None:
+                res = self.connected_resource or "(unknown)"
+                try:
+                    self.inst.close()
+                finally:
+                    self.inst = None
+                    self.connected_resource = None
+                self._log(f"[DISCONNECT] Closed {res}")
+                self.idn_label.config(text="[IDN] - Not connected")
+                self.status.set("Disconnected.")
+            else:
+                self.status.set("Nothing to disconnect.")
+        except Exception as e:
+            messagebox.showerror("Disconnect failed", str(e))
 
     def _check_connected(self):
         if self.inst is None:
@@ -325,7 +378,6 @@ class PSUControlGUI(tk.Tk):
         return True
 
     def _show_controls_for(self, devtype: str):
-        # Hide both, show the selected
         for w in (self.hmp_frame, self.e36_frame):
             w.pack_forget()
         if devtype == "HMP4040":
@@ -337,7 +389,6 @@ class PSUControlGUI(tk.Tk):
         self.log.insert("end", msg + "\n")
         self.log.see("end")
 
-# --------------------------- Run app -----------------------------------
 
 if __name__ == "__main__":
     app = PSUControlGUI()

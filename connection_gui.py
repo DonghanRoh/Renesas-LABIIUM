@@ -29,7 +29,7 @@ class MockInstrument:
 class HMP4040GUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("HMP4040 Control GUI (minimal)")
+        self.title("Control GUI")
         self.geometry("900x500")
 
         self.rm = None

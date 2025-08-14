@@ -30,7 +30,7 @@ class MockInstrument:
 # -----------------------------
 # Minimal GUI: scan/connect/list/log
 # -----------------------------
-class HMP4040GUI(tk.Tk):
+class GUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Control GUI")
@@ -352,5 +352,5 @@ class HMP4040GUI(tk.Tk):
 
 
 if __name__ == "__main__":
-    app = HMP4040GUI()
+    app = GUI()
     app.mainloop()

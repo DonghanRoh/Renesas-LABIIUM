@@ -1,11 +1,10 @@
 # general_scpi_gui.py
-# Revised: adopt connection pattern from connection_gui.py
-# - Robust ASRL(serial) open with baud/termination trials
-# - Standard open for non-serial resources
-# - Clean handling of read/write terminations as literal "\n" etc.
-# - NEW: Devices table (Treeview) for scanned/connected resources + label editor
+# Revised: add devices table + inline label editing + command descriptions
+# - Remove "Label (current)" editor; keep only "Label for selected" editor
+# - Enable in-table (Treeview) inline edit for the Label column via double-click
+# - Show description for each SCPI command selection
+# - Retain robust ASRL serial handling and standard non-serial handling
 
-import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 import pyvisa
@@ -30,6 +29,20 @@ COMMANDS = [
     "SYST:ERR?",
 ]
 
+COMMAND_MEANINGS = {
+    "*IDN?": "Identification query. Returns the instrument’s manufacturer, model, serial number, and firmware version.",
+    "*CLS": "Clear Status. Resets the event registers and clears any pending errors.",
+    "*RST": "Reset. Returns the instrument to its default (factory) settings.",
+    "*OPC?": "Operation Complete query. Returns 1 when all previous commands have finished executing.",
+    "*WAI": "Wait-to-continue. Halts command processing until all prior commands have completed.",
+    "*TST?": "Self-test query. Runs the instrument’s internal diagnostics and returns the result (0 means no errors).",
+    "*ESE {param}": "Event Status Enable. Enables specific bits in the Event Status Register. Provide a decimal bitmask in {param}.",
+    "*ESR?": "Event Status Register query. Reads the value of the Event Status Register.",
+    "*SRE {param}": "Service Request Enable. Sets which conditions can trigger a Service Request (SRQ). Provide a decimal bitmask in {param}.",
+    "*STB?": "Status Byte query. Reads the Status Byte Register.",
+    "SYST:ERR?": "System error query. Returns the most recent error message (or '0, No error' if none).",
+}
+
 QUERYABLE_BASES = {"*IDN", "*OPC", "*TST", "*ESR", "*STB", "SYST:ERR"}
 
 
@@ -43,20 +56,27 @@ class GeneralSCPIGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("General SCPI GUI (PyVISA)")
-        self.geometry("1100x760")
+        self.geometry("1100x780")
 
         # VISA / connection state
         self.rm = None
-        # resource_key -> {"inst": DeviceShell, "idn": str, "label": str}
-        self.sessions = {}
+        self.sessions = {}           # resource_key -> {"inst": DeviceShell, "idn": str, "label": str}
         self.scanned_resources = []  # list of strings
-        self.connected_resource = None  # currently "active" resource key (for command area)
-        self.inst = None  # currently active pyvisa instrument
+        self.connected_resource = None  # currently active resource key
+        self.inst = None                # currently active pyvisa instrument
 
-        # UI state vars
+        # UI state
         self.resource_var = tk.StringVar()
-        self.cur_label_var = tk.StringVar(value="")  # old single-field label editor (kept)
-        self.sel_label_var = tk.StringVar(value="")  # table label editor (new)
+        self.sel_label_var = tk.StringVar(value="")
+        self.cmd_var = tk.StringVar(value=COMMANDS[0])
+        self.param_var = tk.StringVar(value="")
+        self.custom_var = tk.StringVar()
+        self.cmd_desc_var = tk.StringVar(value=COMMAND_MEANINGS.get(COMMANDS[0], ""))
+
+        # inline edit widgets
+        self._inline_entry = None
+        self._inline_item = None
+        self._inline_column = None
 
         self._build_ui()
 
@@ -78,15 +98,7 @@ class GeneralSCPIGUI(tk.Tk):
         self.idn_label = ttk.Label(conn, text="[IDN] - Not connected")
         self.idn_label.grid(row=1, column=0, columnspan=6, padx=6, pady=(0, 8), sticky="w")
 
-        # Simple label editor for current connection (kept for convenience)
-        labelf = ttk.Frame(conn)
-        labelf.grid(row=2, column=0, columnspan=6, sticky="we", padx=6, pady=(0, 8))
-        ttk.Label(labelf, text="Label (current):").pack(side="left", padx=(0, 6))
-        self.cur_label_entry = ttk.Entry(labelf, textvariable=self.cur_label_var, width=32)
-        self.cur_label_entry.pack(side="left")
-        ttk.Button(labelf, text="Save Label", command=self._save_current_label).pack(side="left", padx=6)
-
-        # NEW: Devices table
+        # Devices table
         devf = ttk.LabelFrame(self, text="Devices (connected)")
         devf.pack(fill="both", expand=False, padx=10, pady=(0, 8))
 
@@ -100,8 +112,9 @@ class GeneralSCPIGUI(tk.Tk):
         self.dev_tree.column("label", width=220, anchor="w")
         self.dev_tree.pack(fill="both", expand=True, padx=6, pady=(6, 0))
         self.dev_tree.bind("<<TreeviewSelect>>", self._on_tree_selection)
+        self.dev_tree.bind("<Double-1>", self._on_tree_double_click)
 
-        # Label editor for selected row
+        # Label editor for selected row (kept, simpler than inline when preferred)
         editor = ttk.Frame(devf)
         editor.pack(fill="x", padx=6, pady=(6, 6))
         ttk.Label(editor, text="Label for selected:").grid(row=0, column=0, padx=(0, 6), pady=4, sticky="e")
@@ -115,22 +128,28 @@ class GeneralSCPIGUI(tk.Tk):
         cmdf.pack(fill="x", padx=10, pady=(0, 8))
 
         ttk.Label(cmdf, text="Command:").grid(row=0, column=0, padx=6, pady=8, sticky="e")
-        self.cmd_var = tk.StringVar(value=COMMANDS[0])
         self.cmd_combo = ttk.Combobox(cmdf, textvariable=self.cmd_var, values=COMMANDS, width=28, state="readonly")
         self.cmd_combo.grid(row=0, column=1, padx=(0, 8), pady=8, sticky="w")
+        self.cmd_combo.bind("<<ComboboxSelected>>", self._on_command_selected)
 
         ttk.Label(cmdf, text="Param (if needed):").grid(row=0, column=2, padx=6, pady=8, sticky="e")
-        self.param_var = tk.StringVar(value="")
         ttk.Entry(cmdf, textvariable=self.param_var, width=16).grid(row=0, column=3, padx=(0, 8), pady=8, sticky="w")
 
         ttk.Button(cmdf, text="Write", command=self.do_write).grid(row=0, column=4, padx=6, pady=8)
         ttk.Button(cmdf, text="Query", command=self.do_query).grid(row=0, column=5, padx=6, pady=8)
 
-        ttk.Label(cmdf, text="Custom SCPI:").grid(row=1, column=0, padx=6, pady=(0, 8), sticky="e")
-        self.custom_var = tk.StringVar()
-        ttk.Entry(cmdf, textvariable=self.custom_var).grid(row=1, column=1, columnspan=3, padx=(0, 8), pady=(0, 8), sticky="we")
-        ttk.Button(cmdf, text="Write (custom)", command=self.custom_write).grid(row=1, column=4, padx=6, pady=(0, 8))
-        ttk.Button(cmdf, text="Query (custom)", command=self.custom_query).grid(row=1, column=5, padx=6, pady=(0, 8))
+        # Command description (auto-updates with selection)
+        descf = ttk.Frame(cmdf)
+        descf.grid(row=1, column=0, columnspan=6, sticky="we", padx=6, pady=(0, 8))
+        ttk.Label(descf, text="Meaning:").pack(side="left", padx=(0, 6))
+        self.cmd_desc_label = ttk.Label(descf, textvariable=self.cmd_desc_var, wraplength=950, justify="left")
+        self.cmd_desc_label.pack(side="left", fill="x", expand=True)
+
+        # Custom SCPI row
+        ttk.Label(cmdf, text="Custom SCPI:").grid(row=2, column=0, padx=6, pady=(0, 8), sticky="e")
+        ttk.Entry(cmdf, textvariable=self.custom_var).grid(row=2, column=1, columnspan=3, padx=(0, 8), pady=(0, 8), sticky="we")
+        ttk.Button(cmdf, text="Write (custom)", command=self.custom_write).grid(row=2, column=4, padx=6, pady=(0, 8))
+        ttk.Button(cmdf, text="Query (custom)", command=self.custom_query).grid(row=2, column=5, padx=6, pady=(0, 8))
 
         # Log section
         logf = ttk.LabelFrame(self, text="Log")
@@ -170,22 +189,7 @@ class GeneralSCPIGUI(tk.Tk):
         else:
             self.idn_label.config(text="[IDN] - Not connected")
 
-    def _save_current_label(self):
-        key = self.connected_resource
-        if not key or key not in self.sessions:
-            messagebox.showinfo("No active device", "Connect to a device first.")
-            return
-        new_label = (self.cur_label_var.get() or "").strip()
-        self.sessions[key]["label"] = new_label
-        self._update_idn_banner()
-        # reflect in table if present
-        if key in self._tree_iids():
-            vals = list(self.dev_tree.item(key, "values"))
-            if len(vals) == 3:
-                vals[2] = new_label
-                self.dev_tree.item(key, values=vals)
-
-    # Tree helpers
+    # ---------- tree (table) interactions ----------
     def _tree_iids(self):
         return set(self.dev_tree.get_children())
 
@@ -195,13 +199,66 @@ class GeneralSCPIGUI(tk.Tk):
             return
         key = sel[0]
         if key in self.sessions:
-            # Activate this connection for command block
             self.connected_resource = key
             self.inst = self.sessions[key]["inst"].inst
-            self.cur_label_var.set(self.sessions[key].get("label", ""))
             self.sel_label_var.set(self.sessions[key].get("label", ""))
-            self.resource_var.set(key)  # also mirror into combobox
+            self.resource_var.set(key)
             self._update_idn_banner()
+
+    def _on_tree_double_click(self, event):
+        # Allow inline edit only for Label column
+        region = self.dev_tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+        column = self.dev_tree.identify_column(event.x)  # like '#1', '#2', '#3'
+        if column != '#3':  # Label column index (resource=#1, idn=#2, label=#3)
+            return
+        row = self.dev_tree.identify_row(event.y)
+        if not row:
+            return
+        x, y, w, h = self.dev_tree.bbox(row, column)
+        if w <= 0 or h <= 0:
+            return
+
+        # Current value
+        vals = list(self.dev_tree.item(row, "values"))
+        cur_val = vals[2] if len(vals) >= 3 else ""
+
+        # Create entry overlay
+        self._inline_destroy()
+        self._inline_item = row
+        self._inline_column = column
+        self._inline_entry = ttk.Entry(self.dev_tree)
+        self._inline_entry.place(x=x, y=y, width=w, height=h)
+        self._inline_entry.insert(0, cur_val)
+        self._inline_entry.focus_set()
+        self._inline_entry.bind("<Return>", self._inline_commit)
+        self._inline_entry.bind("<Escape>", lambda e: self._inline_destroy())
+        self._inline_entry.bind("<FocusOut>", lambda e: self._inline_commit(e, silent=True))
+
+    def _inline_commit(self, event=None, silent=False):
+        if not self._inline_entry or not self._inline_item:
+            return
+        new_val = self._inline_entry.get().strip()
+        vals = list(self.dev_tree.item(self._inline_item, "values"))
+        if len(vals) >= 3:
+            vals[2] = new_val
+            self.dev_tree.item(self._inline_item, values=vals)
+        # update sessions and banner
+        key = self._inline_item
+        if key in self.sessions:
+            self.sessions[key]["label"] = new_val
+            if key == self.connected_resource:
+                self.sel_label_var.set(new_val)
+                self._update_idn_banner()
+        self._inline_destroy()
+
+    def _inline_destroy(self):
+        if self._inline_entry:
+            self._inline_entry.destroy()
+        self._inline_entry = None
+        self._inline_item = None
+        self._inline_column = None
 
     def _save_selected_label(self):
         sel = self.dev_tree.selection()
@@ -218,7 +275,6 @@ class GeneralSCPIGUI(tk.Tk):
             vals[2] = new_label
             self.dev_tree.item(key, values=vals)
         if key == self.connected_resource:
-            self.cur_label_var.set(new_label)
             self._update_idn_banner()
 
     # ---------- scanning ----------
@@ -328,7 +384,6 @@ class GeneralSCPIGUI(tk.Tk):
         if sel in self.sessions:
             self.connected_resource = sel
             self.inst = self.sessions[sel]["inst"].inst
-            self.cur_label_var.set(self.sessions[sel].get("label", ""))
             self.sel_label_var.set(self.sessions[sel].get("label", ""))
             self._update_idn_banner()
             self.status.set("Activated existing connection.")
@@ -338,7 +393,6 @@ class GeneralSCPIGUI(tk.Tk):
                 self.dev_tree.selection_set(sel)
                 self.dev_tree.focus(sel)
             else:
-                # insert if somehow missing
                 info = self.sessions[sel]
                 self.dev_tree.insert("", "end", iid=sel, values=(sel, info.get("idn", ""), info.get("label", "")))
             return
@@ -362,8 +416,6 @@ class GeneralSCPIGUI(tk.Tk):
             self.sessions[sel] = {"inst": dev, "idn": idn, "label": ""}
             self.connected_resource = sel
             self.inst = dev.inst
-            self.cur_label_var.set("")
-            self.sel_label_var.set("")
             self.idn_label.config(text=f"[IDN] {idn or '(no response)'}  ({sel})")
             self._log(f"[CONNECT] Connected {sel}  IDN: {idn or '(no response)'}")
             self.status.set("Connected.")
@@ -446,15 +498,6 @@ class GeneralSCPIGUI(tk.Tk):
 
     def _disconnect_key(self, res: str):
         try:
-            # close live inst if it's the same object
-            inst = None
-            if res in self.sessions:
-                try:
-                    inst = self.sessions[res]["inst"].inst
-                    inst.close()
-                except Exception:
-                    pass
-            # remove from sessions
             if res in self.sessions:
                 try:
                     self.sessions[res]["inst"].inst.close()
@@ -475,7 +518,6 @@ class GeneralSCPIGUI(tk.Tk):
                     self.inst = None
                     self.idn_label.config(text="[IDN] - Not connected")
 
-            # if the disconnected one was active
             if self.connected_resource == res:
                 self.connected_resource = None
                 self.inst = None
@@ -483,8 +525,8 @@ class GeneralSCPIGUI(tk.Tk):
 
             self._log(f"[DISCONNECT] Closed {res}")
             self.status.set("Disconnected.")
-        except Exception as e:
-            messagebox.showerror("Disconnect failed", str(e))
+        except Exception:
+            messagebox.showerror("Disconnect failed", "An error occurred while disconnecting.")
 
     # ---------- command helpers ----------
     def _check_connected(self):
@@ -507,6 +549,10 @@ class GeneralSCPIGUI(tk.Tk):
             if base_up in QUERYABLE_BASES:
                 cmd = cmd + "?"
         return cmd
+
+    def _on_command_selected(self, event=None):
+        tpl = self.cmd_var.get()
+        self.cmd_desc_var.set(COMMAND_MEANINGS.get(tpl, ""))
 
     # ---------- write/query ----------
     def do_write(self):

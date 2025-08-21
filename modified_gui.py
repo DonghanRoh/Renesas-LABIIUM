@@ -15,9 +15,10 @@
 # - Also generates self.inst_dict grouped and ordered by type/number with aligned formatting
 #
 # New (2025-08-21):
-# - PSU model-aware control panel:
-#   * If active device Type=ps and model is HMP4040 -> channels [1,2,3,4], use INST:NSEL n + SOUR:VOLT/CURR
-#   * If active device Type=ps and model is E3631A -> channels [P6V,P25V,N25V], use INST:SEL <name> + VOLT/CURR
+# - Row-click activation in Devices table (Connect Selected removed)
+# - PSU model-aware control panel placed BELOW "General SCPI Command"
+#   * If active device IDN contains HMP4040 -> channels [1,2,3,4], use INST:NSEL n + SOUR:VOLT/CURR
+#   * If active device IDN contains E3631A -> channels [P6V,P25V,N25V], use INST:SEL <name> + VOLT/CURR
 #   * Others -> PSU panel hidden
 
 import os
@@ -47,7 +48,7 @@ COMMANDS = [
 
 QUERYABLE_BASES = {"*IDN", "*OPC", "*TST", "*ESR", "*STB", "SYST:ERR"}
 
-# --- New: dropdown choices ---
+# --- Dropdown choices ---
 LABEL_TYPES = ["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "cont", "temp_force"]
 LABEL_NUMBERS = ["No Number", "1", "2", "3", "4", "5"]
 
@@ -83,8 +84,12 @@ class GeneralSCPIGUI(tk.Tk):
         self.inst = None                 # currently active pyvisa instrument
 
         # Devices table state
-        # list of row dicts: {"resource": str, "type_var": tk.StringVar, "num_var": tk.StringVar, "label_var": tk.StringVar}
+        # list of row dicts: {"resource": str, "type_var": tk.StringVar, "num_var": tk.StringVar, "label_var": tk.StringVar, "widgets": [cells]}
         self.device_rows = []
+
+        # Visuals for active row highlight
+        self._row_active_bg = "#fff9d6"     # light yellow
+        self._row_default_bg = None         # detect at runtime
 
         # PSU control state
         self.psu_frame = None
@@ -97,6 +102,7 @@ class GeneralSCPIGUI(tk.Tk):
 
     # ---------- UI ----------
     def _build_ui(self):
+        # ----- Connection -----
         conn = ttk.LabelFrame(self, text="Connection")
         conn.pack(fill="x", padx=10, pady=(10, 8))
 
@@ -107,18 +113,12 @@ class GeneralSCPIGUI(tk.Tk):
         self.resource_combo = ttk.Combobox(conn, textvariable=self.resource_var, width=42, state="readonly")
         self.resource_combo.grid(row=0, column=2, padx=(0, 6), pady=8, sticky="w")
 
-        ttk.Button(conn, text="Connect Selected", command=self.connect_selected).grid(row=0, column=3, padx=6, pady=8)
-        ttk.Button(conn, text="Connect All", command=self.connect_all).grid(row=0, column=4, padx=6, pady=8)
-        ttk.Button(conn, text="Disconnect", command=self.disconnect_current).grid(row=0, column=5, padx=6, pady=8)
+        # Connect Selected REMOVED per request
+        ttk.Button(conn, text="Connect All", command=self.connect_all).grid(row=0, column=3, padx=6, pady=8)
+        ttk.Button(conn, text="Disconnect", command=self.disconnect_current).grid(row=0, column=4, padx=6, pady=8)
 
         self.idn_label = ttk.Label(conn, text="[IDN] - Not connected")
         self.idn_label.grid(row=1, column=0, columnspan=6, padx=6, pady=(0, 8), sticky="w")
-
-        # ----- PSU Controls (model-aware, hidden by default) -----
-        self.psu_frame = ttk.LabelFrame(self, text="Power Supply Controls")
-        self.psu_frame.pack(fill="x", padx=10, pady=(0, 8))
-        self._build_psu_controls()
-        self._show_psu_controls(False)
 
         # ----- Devices (connected) table -----
         devicesf = ttk.LabelFrame(self, text="Devices (connected)")
@@ -155,6 +155,12 @@ class GeneralSCPIGUI(tk.Tk):
         ttk.Entry(cmdf, textvariable=self.custom_var).grid(row=1, column=1, columnspan=3, padx=(0, 8), pady=(0, 8), sticky="we")
         ttk.Button(cmdf, text="Write (custom)", command=self.custom_write).grid(row=1, column=4, padx=6, pady=(0, 8))
         ttk.Button(cmdf, text="Query (custom)", command=self.custom_query).grid(row=1, column=5, padx=6, pady=(0, 8))
+
+        # ----- PSU Controls (model-aware, hidden by default) BELOW General SCPI -----
+        self.psu_frame = ttk.LabelFrame(self, text="Power Supply Controls")
+        self.psu_frame.pack(fill="x", padx=10, pady=(0, 8))
+        self._build_psu_controls()
+        self._show_psu_controls(False)
 
         # ----- Log -----
         logf = ttk.LabelFrame(self, text="Log")
@@ -207,33 +213,21 @@ class GeneralSCPIGUI(tk.Tk):
             return "E3631A"
         return ""
 
-    def _active_is_ps(self) -> bool:
-        if not self.connected_resource or self.connected_resource not in self.sessions:
-            return False
-        info = self.sessions[self.connected_resource]
-        return trim(info.get("label_type", "")) == "ps"
-
     def _update_psu_panel(self):
-        """Rebuild PSU channel list and model label based on active device."""
+        """Rebuild PSU channel list and model label based on active device's IDN (no Type check)."""
         if not self.inst or not self.connected_resource or self.connected_resource not in self.sessions:
             self._show_psu_controls(False)
             return
 
         info = self.sessions[self.connected_resource]
-        if trim(info.get("label_type", "")) != "ps":
-            self._show_psu_controls(False)
-            return
-
         idn = info.get("idn", "")
         model = self._detect_model(idn)
-        self.psu_model_label_var.set(model or "(Unknown PSU)")
+        self.psu_model_label_var.set(model or "(Unknown)")
         if model == "HMP4040":
             chs = ["1", "2", "3", "4"]
         elif model == "E3631A":
-            # As requested: only P6V, P25V, N25V (no 1/2/3)
-            chs = ["P6V", "P25V", "N25V"]
+            chs = ["P6V", "P25V", "N25V"]  # per request; 1/2/3 removed
         else:
-            # Unknown PSU: hide controls
             self._show_psu_controls(False)
             return
 
@@ -268,9 +262,6 @@ class GeneralSCPIGUI(tk.Tk):
         try:
             if not self._check_connected():
                 return
-            if not self._active_is_ps():
-                messagebox.showinfo("Not a PSU", "Active device type is not 'ps'.")
-                return
             model = self._psu_get_model()
             channel = trim(self.psu_channel_var.get())
             v = float(self.psu_voltage_var.get())
@@ -286,9 +277,6 @@ class GeneralSCPIGUI(tk.Tk):
     def psu_set_current(self):
         try:
             if not self._check_connected():
-                return
-            if not self._active_is_ps():
-                messagebox.showinfo("Not a PSU", "Active device type is not 'ps'.")
                 return
             model = self._psu_get_model()
             channel = trim(self.psu_channel_var.get())
@@ -306,9 +294,6 @@ class GeneralSCPIGUI(tk.Tk):
         try:
             if not self._check_connected():
                 return
-            if not self._active_is_ps():
-                messagebox.showinfo("Not a PSU", "Active device type is not 'ps'.")
-                return
             model = self._psu_get_model()
             channel = trim(self.psu_channel_var.get())
             self._psu_select_channel(model, channel)
@@ -324,9 +309,6 @@ class GeneralSCPIGUI(tk.Tk):
     def psu_query_current(self):
         try:
             if not self._check_connected():
-                return
-            if not self._active_is_ps():
-                messagebox.showinfo("Not a PSU", "Active device type is not 'ps'.")
                 return
             model = self._psu_get_model()
             channel = trim(self.psu_channel_var.get())
@@ -390,6 +372,38 @@ class GeneralSCPIGUI(tk.Tk):
         for c, weight in enumerate([0, 1, 0, 1, 2, 3]):
             self.device_table.grid_columnconfigure(c, weight=weight)
 
+    def _activate_resource(self, resource_key: str):
+        """Activate a connected session by resource key (row click)."""
+        if resource_key not in self.sessions:
+            messagebox.showinfo("Not connected", "This resource is not connected.")
+            return
+        self.connected_resource = resource_key
+        self.inst = self.sessions[resource_key]["inst"].inst
+        self._update_idn_banner()
+        self._log(f"[ACTIVATE] {resource_key}")
+        self.status.set("Activated.")
+        self._refresh_row_highlights()
+        self._update_psu_panel()
+
+    def _refresh_row_highlights(self):
+        for row in self.device_rows:
+            widgets = row.get("widgets", [])
+            bg = self._row_active_bg if row["resource"] == self.connected_resource else self._row_default_bg
+            for w in widgets:
+                try:
+                    w.config(bg=bg)
+                except Exception:
+                    pass
+
+    def _make_clickable_cell(self, text, r, c, resource_key):
+        lbl = tk.Label(self.device_table, text=text, borderwidth=1, relief="solid", padx=6, pady=2, anchor="w")
+        if self._row_default_bg is None:
+            self._row_default_bg = lbl.cget("bg")
+        # bind click to activate
+        lbl.bind("<Button-1>", lambda e, rk=resource_key: self._activate_resource(rk))
+        lbl.grid(row=r, column=c, sticky="nsew")
+        return lbl
+
     def _refresh_devices_table(self):
         self._build_devices_table_headers()
         # Deterministic row order
@@ -400,10 +414,12 @@ class GeneralSCPIGUI(tk.Tk):
             n_default = info.get("label_num", "No Number")
             combined = info.get("label", "")
 
-            # index cell
-            tk.Label(self.device_table, text=str(r), borderwidth=1, relief="solid", padx=4, pady=2, anchor="w").grid(row=r, column=0, sticky="nsew")
+            row_widgets = []
 
-            # type cell (dropdown)
+            # index cell (clickable)
+            row_widgets.append(self._make_clickable_cell(str(r), r, 0, resource_key))
+
+            # type cell (dropdown) - changes saved; clicking label cells activates, but dropdown itself not clickable to activate
             type_var = tk.StringVar(value=t_default)
             type_cb = ttk.Combobox(self.device_table, textvariable=type_var, values=LABEL_TYPES, state="readonly", width=12)
             type_cb.grid(row=r, column=1, sticky="nsew")
@@ -413,16 +429,19 @@ class GeneralSCPIGUI(tk.Tk):
             num_cb = ttk.Combobox(self.device_table, textvariable=num_var, values=LABEL_NUMBERS, state="readonly", width=10)
             num_cb.grid(row=r, column=2, sticky="nsew")
 
-            # combined label (read-only)
+            # combined label (read-only, clickable)
             label_var = tk.StringVar(value=combined)
             lbl = tk.Label(self.device_table, textvariable=label_var, borderwidth=1, relief="solid", padx=6, pady=2, anchor="w")
+            if self._row_default_bg is None:
+                self._row_default_bg = lbl.cget("bg")
+            lbl.bind("<Button-1>", lambda e, rk=resource_key: self._activate_resource(rk))
             lbl.grid(row=r, column=3, sticky="nsew")
+            row_widgets.append(lbl)
 
-            # resource cell
-            tk.Label(self.device_table, text=resource_key, borderwidth=1, relief="solid", padx=6, pady=2, anchor="w").grid(row=r, column=4, sticky="nsew")
-
-            # idn cell
-            tk.Label(self.device_table, text=idn, borderwidth=1, relief="solid", padx=6, pady=2, anchor="w").grid(row=r, column=5, sticky="nsew")
+            # resource cell (clickable)
+            row_widgets.append(self._make_clickable_cell(resource_key, r, 4, resource_key))
+            # idn cell (clickable)
+            row_widgets.append(self._make_clickable_cell(idn, r, 5, resource_key))
 
             # keep bindings: whenever type/num changes, recompute combined label and update session
             def _apply_change(*_, rk=resource_key, tvar=type_var, nvar=num_var, lvar=label_var):
@@ -436,8 +455,6 @@ class GeneralSCPIGUI(tk.Tk):
                 self.sessions[rk]["label"] = comb
                 if rk == self.connected_resource:
                     self._update_idn_banner()
-                    # Type change of active device may affect PSU panel
-                    self._update_psu_panel()
                 self._check_labels_filled()
 
             type_var.trace_add("write", _apply_change)
@@ -448,10 +465,12 @@ class GeneralSCPIGUI(tk.Tk):
                 "resource": resource_key,
                 "type_var": type_var,
                 "num_var": num_var,
-                "label_var": label_var,  # read-only combined
+                "label_var": label_var,
+                "widgets": row_widgets,
             })
 
         self._check_labels_filled()
+        self._refresh_row_highlights()
         # Ensure PSU panel reflects any table updates for the active resource
         self._update_psu_panel()
 
@@ -559,57 +578,6 @@ class GeneralSCPIGUI(tk.Tk):
             pass
         return DeviceShell(inst)
 
-    def connect_selected(self):
-        sel = trim(self.resource_var.get())
-        if not sel:
-            messagebox.showinfo("No resource", "Select a VISA resource first.")
-            return
-
-        # Already connected? Just activate it.
-        if sel in self.sessions:
-            self.connected_resource = sel
-            self.inst = self.sessions[sel]["inst"].inst
-            self._update_idn_banner()
-            self.status.set("Activated existing connection.")
-            self._log(f"[ACTIVATE] {sel}")
-            self._update_psu_panel()
-            return
-
-        self._busy(True, f"Connecting to {sel}...")
-        try:
-            if sel.upper().startswith("ASRL"):
-                dev, idn = self._try_open_serial(sel)
-                if dev is None:
-                    self._log(f"[ERROR] Failed to connect {sel}: no response on serial.")
-                    messagebox.showerror("Connect failed", f"No response on serial: {sel}")
-                    return
-            else:
-                dev = self._open_nonserial(sel)
-                try:
-                    idn = dev.inst.query("*IDN?").strip()
-                except Exception:
-                    idn = ""
-
-            # store session and activate
-            self.sessions[sel] = {
-                "inst": dev, "idn": idn,
-                "label": "",
-                "label_type": "",         # New
-                "label_num": "No Number", # New
-            }
-            self.connected_resource = sel
-            self.inst = dev.inst
-            self._update_idn_banner()
-            self._log(f"[CONNECT] Connected {sel}  IDN: {idn or '(no response)'}")
-            self.status.set("Connected.")
-            self._refresh_devices_table()
-            self._update_psu_panel()
-        except Exception as e:
-            messagebox.showerror("Connect failed", str(e))
-            self.status.set("Connect failed.")
-        finally:
-            self._busy(False, "Ready.")
-
     def connect_all(self):
         if not self.scanned_resources:
             messagebox.showinfo("Nothing to connect", "Scan resources first.")
@@ -644,16 +612,12 @@ class GeneralSCPIGUI(tk.Tk):
 
                 # If nothing active yet, activate first successful
                 if not self.connected_resource:
-                    self.connected_resource = resource_key
-                    self.inst = dev.inst
-                    self.resource_var.set(resource_key)
-                    self._update_idn_banner()
+                    self._activate_resource(resource_key)
             except Exception as e:
                 self._log(f"[ERROR] Failed to connect {resource_key}: {e}")
 
         self.status.set(f"Connected {connected_count} device(s).")
         self._refresh_devices_table()
-        self._update_psu_panel()
         self._busy(False, "Ready.")
 
     def disconnect_current(self):
@@ -687,7 +651,7 @@ class GeneralSCPIGUI(tk.Tk):
     # ---------- command helpers ----------
     def _check_connected(self):
         if not self.inst:
-            messagebox.showinfo("Not connected", "Connect to a VISA resource first.")
+            messagebox.showinfo("Not connected", "Activate a connected device by clicking its row in the table, or connect devices first.")
             return False
         return True
 

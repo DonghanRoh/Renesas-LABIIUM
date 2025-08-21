@@ -20,6 +20,7 @@
 #   * If active device IDN contains HMP4040 -> channels [1,2,3,4], use INST:NSEL n + SOUR:VOLT/CURR
 #   * If active device IDN contains E3631A -> channels [P6V,P25V,N25V], use INST:SEL <name> + VOLT/CURR
 #   * Others -> PSU panel hidden
+# - FIX: PSU show/hide uses pack()/pack_forget() (no grid mix)
 
 import os
 import re
@@ -84,8 +85,7 @@ class GeneralSCPIGUI(tk.Tk):
         self.inst = None                 # currently active pyvisa instrument
 
         # Devices table state
-        # list of row dicts: {"resource": str, "type_var": tk.StringVar, "num_var": tk.StringVar, "label_var": tk.StringVar, "widgets": [cells]}
-        self.device_rows = []
+        self.device_rows = []  # list of dicts per row
 
         # Visuals for active row highlight
         self._row_active_bg = "#fff9d6"     # light yellow
@@ -160,7 +160,7 @@ class GeneralSCPIGUI(tk.Tk):
         self.psu_frame = ttk.LabelFrame(self, text="Power Supply Controls")
         self.psu_frame.pack(fill="x", padx=10, pady=(0, 8))
         self._build_psu_controls()
-        self._show_psu_controls(False)
+        self._show_psu_controls(False)  # start hidden
 
         # ----- Log -----
         logf = ttk.LabelFrame(self, text="Log")
@@ -202,7 +202,12 @@ class GeneralSCPIGUI(tk.Tk):
             self.psu_frame.grid_columnconfigure(c, weight=w)
 
     def _show_psu_controls(self, show: bool):
-        self.psu_frame.grid() if show else self.psu_frame.grid_remove()
+        # Use pack()/pack_forget() because psu_frame is packed (not gridded)
+        managed = (self.psu_frame.winfo_manager() == "pack")
+        if show and not managed:
+            self.psu_frame.pack(fill="x", padx=10, pady=(0, 8))
+        elif not show and managed:
+            self.psu_frame.pack_forget()
 
     def _detect_model(self, idn: str) -> str:
         """Return 'HMP4040', 'E3631A', or ''."""
@@ -241,10 +246,8 @@ class GeneralSCPIGUI(tk.Tk):
     def _psu_select_channel(self, model: str, channel: str):
         """Send SCPI to select the given channel on the given model."""
         if model == "HMP4040":
-            # HMP4040 uses INST:NSEL <1..4>
             self.inst.write(f"INST:NSEL {channel}")
         elif model == "E3631A":
-            # E3631A uses INST:SEL <P6V|P25V|N25V>
             self.inst.write(f"INST:SEL {channel}")
         else:
             raise RuntimeError("Unsupported PSU model for channel selection.")
@@ -345,7 +348,7 @@ class GeneralSCPIGUI(tk.Tk):
             base = f"[IDN] {idn} ({self.connected_resource})"
             self.idn_label.config(text=(f"{label} | {base}" if label else base))
         else:
-            self.idn_label.config(text="[IDN] - Not connected")
+            self.idn_label.config(text("[IDN] - Not connected"))
 
     # ---------- devices table ----------
     def _build_devices_table_headers(self):
@@ -373,7 +376,7 @@ class GeneralSCPIGUI(tk.Tk):
             self.device_table.grid_columnconfigure(c, weight=weight)
 
     def _activate_resource(self, resource_key: str):
-        """Activate a connected session by resource key (row click)."""
+        """Activate a connected session by resource key (row/cell click)."""
         if resource_key not in self.sessions:
             messagebox.showinfo("Not connected", "This resource is not connected.")
             return
@@ -399,7 +402,6 @@ class GeneralSCPIGUI(tk.Tk):
         lbl = tk.Label(self.device_table, text=text, borderwidth=1, relief="solid", padx=6, pady=2, anchor="w")
         if self._row_default_bg is None:
             self._row_default_bg = lbl.cget("bg")
-        # bind click to activate
         lbl.bind("<Button-1>", lambda e, rk=resource_key: self._activate_resource(rk))
         lbl.grid(row=r, column=c, sticky="nsew")
         return lbl
@@ -419,15 +421,20 @@ class GeneralSCPIGUI(tk.Tk):
             # index cell (clickable)
             row_widgets.append(self._make_clickable_cell(str(r), r, 0, resource_key))
 
-            # type cell (dropdown) - changes saved; clicking label cells activates, but dropdown itself not clickable to activate
+            # type cell (dropdown)
             type_var = tk.StringVar(value=t_default)
             type_cb = ttk.Combobox(self.device_table, textvariable=type_var, values=LABEL_TYPES, state="readonly", width=12)
             type_cb.grid(row=r, column=1, sticky="nsew")
+            # Activate on click/selection
+            type_cb.bind("<Button-1>", lambda e, rk=resource_key: self._activate_resource(rk))
+            type_cb.bind("<<ComboboxSelected>>", lambda e, rk=resource_key: self._activate_resource(rk))
 
             # number cell (dropdown)
             num_var = tk.StringVar(value=n_default if n_default in LABEL_NUMBERS else "No Number")
             num_cb = ttk.Combobox(self.device_table, textvariable=num_var, values=LABEL_NUMBERS, state="readonly", width=10)
             num_cb.grid(row=r, column=2, sticky="nsew")
+            num_cb.bind("<Button-1>", lambda e, rk=resource_key: self._activate_resource(rk))
+            num_cb.bind("<<ComboboxSelected>>", lambda e, rk=resource_key: self._activate_resource(rk))
 
             # combined label (read-only, clickable)
             label_var = tk.StringVar(value=combined)
@@ -631,7 +638,6 @@ class GeneralSCPIGUI(tk.Tk):
                 # remove from sessions
                 if res in self.sessions:
                     try:
-                        # ensure underlying resource closed
                         self.sessions[res]["inst"].inst.close()
                     except Exception:
                         pass
@@ -651,7 +657,7 @@ class GeneralSCPIGUI(tk.Tk):
     # ---------- command helpers ----------
     def _check_connected(self):
         if not self.inst:
-            messagebox.showinfo("Not connected", "Activate a connected device by clicking its row in the table, or connect devices first.")
+            messagebox.showinfo("Not connected", "Activate a connected device by clicking a cell in the table, or connect devices first.")
             return False
         return True
 
@@ -732,32 +738,25 @@ class GeneralSCPIGUI(tk.Tk):
     # ---------- script generation ----------
     @staticmethod
     def _sanitize_label(name: str) -> str:
-        """Turn arbitrary label into a safe Python attribute name."""
         name = trim(name)
         if not name:
             return ""
-        # Replace non-identifier chars with underscore
         safe = re.sub(r"\W", "_", name)
-        # If starts with digit, prefix underscore
         if re.match(r"^\d", safe):
             safe = "_" + safe
         return safe
 
     @staticmethod
     def _resource_to_value(resource: str) -> str:
-        """Map VISA resource to desired string value.
-        ASRL<n>::... -> 'COM<n>' else keep resource literal.
-        Accepts typos like ::NSTR as well."""
         m = re.match(r"^ASRL(\d+)", resource.strip(), flags=re.IGNORECASE)
         if m:
             return f"COM{m.group(1)}"
         return resource
 
     def create_scripts(self):
-        # Collect labeled devices (combined labels) and per-row type/num
         labels = []
-        items = []          # (label, resource)
-        dict_entries = []   # (type, num, KEY) where KEY is upper-case label for inst_dict
+        items = []
+        dict_entries = []
 
         for row in self.device_rows:
             label_raw = row["label_var"].get()
@@ -767,23 +766,19 @@ class GeneralSCPIGUI(tk.Tk):
             if not label or not t:
                 messagebox.showerror("Invalid label", "All rows must have a Type selected.")
                 return
-
             labels.append(label)
             items.append((label, row["resource"]))
 
-            # Build uppercase key for inst_dict
             key = t.upper()
             if n and n != "No Number":
                 key = f"{key}{n}"
             dict_entries.append((t, n, key))
 
-        # Check duplicates for attribute labels
         dups = {x for x in labels if labels.count(x) > 1}
         if dups:
             messagebox.showerror("Duplicate labels", f"Labels must be unique. Duplicates: {', '.join(sorted(dups))}")
             return
 
-        # Build file content
         lines = []
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         lines.append("# Auto-generated by General SCPI GUI")
@@ -792,13 +787,10 @@ class GeneralSCPIGUI(tk.Tk):
         lines.append("class TemplateConnection:")
         lines.append("    def __init__(self):")
 
-        # 1) self.<label> = ('<value>') lines
         for label, resource in items:
             value = self._resource_to_value(resource)
             lines.append(f"        self.{label} = ('{value}')")
 
-        # 2) self.inst_dict with required ordering/formatting
-        # Sort by type priority, then by number (No Number -> 0), then by KEY for stability
         def _num_val(num_str: str) -> int:
             if num_str and num_str != "No Number":
                 try:
@@ -812,20 +804,16 @@ class GeneralSCPIGUI(tk.Tk):
             key=lambda x: (TYPE_PRIORITY.get(x[0], 999), _num_val(x[1]), x[2])
         )
 
-        # Group by type preserving the sorted order
         grouped = {}
         for t, n, key in dict_entries_sorted:
             grouped.setdefault(t, []).append(key)
 
-        # If nothing to add, still create empty dict
         if dict_entries_sorted:
-            # Padding for colon alignment
             max_key_len = max(len(k) for _, _, k in dict_entries_sorted)
             def fmt_token(k: str) -> str:
                 pad = " " * (max_key_len - len(k))
                 return f"'{k}'{pad} : ['X']"
 
-            # Build lines per type in specified order
             parts = []
             for t in ["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "cont", "temp_force"]:
                 if t in grouped:
@@ -853,7 +841,6 @@ class GeneralSCPIGUI(tk.Tk):
 
     # ---------- event loop ----------
     def mainloop(self, n=0):
-        # Ensure PSU panel is consistent at start
         self._update_psu_panel()
         super().mainloop(n)
 

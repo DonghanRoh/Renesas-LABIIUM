@@ -1,6 +1,6 @@
 # general_scpi_gui.py
 # Row-click activation + model-aware PSU panel between General SCPI and Log
-# Supports: E3631A (P6V/P25V/N25V), HMP4040 (1..4), HM8143 (U1/U2)
+# Supports: E3631A (P6V/P25V/N25V), HMP4040 (1..4), HMP4030 (1..3), HM8143 (U1/U2)
 
 import os
 import re
@@ -127,7 +127,6 @@ class GeneralSCPIGUI(tk.Tk):
 
         # Log pane
         self.logf = ttk.LabelFrame(self.paned, text="Log")
-        # Text area inside log pane
         log_toolbar = ttk.Frame(self.logf)
         log_toolbar.pack(fill="x", padx=6, pady=(6, 0))
         ttk.Button(log_toolbar, text="Clear Log", command=self.clear_log).pack(side="right")
@@ -182,6 +181,7 @@ class GeneralSCPIGUI(tk.Tk):
     def _detect_model(self, idn: str) -> str:
         s = (idn or "").upper()
         if "HMP4040" in s: return "HMP4040"
+        if "HMP4030" in s: return "HMP4030"
         if "E3631A"  in s: return "E3631A"
         if "HM8143"  in s: return "HM8143"
         return ""
@@ -197,10 +197,12 @@ class GeneralSCPIGUI(tk.Tk):
 
         if model == "HMP4040":
             chs = ["1", "2", "3", "4"]
+        elif model == "HMP4030":
+            chs = ["1", "2", "3"]
         elif model == "E3631A":
             chs = ["P6V", "P25V", "N25V"]
         elif model == "HM8143":
-            chs = ["U1", "U2"]   # HM8143에서 U1/U2만 원격으로 V/I 설정 가능
+            chs = ["U1", "U2"]   # HM8143: U1/U2만 원격 V/I 설정 가능
         else:
             self._show_psu_controls(False); return
 
@@ -213,12 +215,12 @@ class GeneralSCPIGUI(tk.Tk):
     # ---------- PSU SCPI helpers ----------
     def _psu_select_channel(self, model: str, channel: str):
         """Models that need explicit selection; HM8143는 명령 자체에 채널이 포함되므로 불필요."""
-        if model == "HMP4040":
+        if model in ("HMP4040", "HMP4030"):
             self.inst.write(f"INST:NSEL {channel}")
         elif model == "E3631A":
             self.inst.write(f"INST:SEL {channel}")
         elif model == "HM8143":
-            return  # selection handled by command prefix (SU1/SI1 vs SU2/SI2)
+            return  # handled per-command
         else:
             raise RuntimeError("Unsupported PSU model for channel selection.")
 
@@ -242,7 +244,7 @@ class GeneralSCPIGUI(tk.Tk):
                 self.inst.write(f"SU{idx}:{v}")
             else:
                 self._psu_select_channel(model, channel)
-                if model == "HMP4040":
+                if model in ("HMP4040", "HMP4030"):
                     self.inst.write(f"SOUR:VOLT {v}")
                 elif model == "E3631A":
                     self.inst.write(f"VOLT {v}")
@@ -262,7 +264,7 @@ class GeneralSCPIGUI(tk.Tk):
                 self.inst.write(f"SI{idx}:{i}")
             else:
                 self._psu_select_channel(model, channel)
-                if model == "HMP4040":
+                if model in ("HMP4040", "HMP4030"):
                     self.inst.write(f"SOUR:CURR {i}")
                 elif model == "E3631A":
                     self.inst.write(f"CURR {i}")
@@ -281,7 +283,7 @@ class GeneralSCPIGUI(tk.Tk):
                 resp = self.inst.query(f"RU{idx}").strip()  # e.g., "U1:12.34V"
             else:
                 self._psu_select_channel(model, channel)
-                if model == "HMP4040":
+                if model in ("HMP4040", "HMP4030"):
                     resp = self.inst.query("SOUR:VOLT?").strip()
                 elif model == "E3631A":
                     resp = self.inst.query("VOLT?").strip()
@@ -302,7 +304,7 @@ class GeneralSCPIGUI(tk.Tk):
                 resp = self.inst.query(f"RI{idx}").strip()  # e.g., "I1:0.123A"
             else:
                 self._psu_select_channel(model, channel)
-                if model == "HMP4040":
+                if model in ("HMP4040", "HMP4030"):
                     resp = self.inst.query("SOUR:CURR?").strip()
                 elif model == "E3631A":
                     resp = self.inst.query("CURR?").strip()

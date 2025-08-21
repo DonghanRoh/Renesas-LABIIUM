@@ -27,6 +27,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import pyvisa
 from pyvisa import constants as pv  # parity/stopbits constants
+from typing import Optional  # <<< for Python 3.7–3.9 compatibility
 
 def trim(s: str) -> str:
     return (s or "").strip()
@@ -72,7 +73,6 @@ def _detect_psu_profile_from_idn(idn: str) -> str:
     if "KEYSIGHT" in s or "AGILENT" in s or "HEWLETT-PACKARD" in s:
         if "E3631A" in s:
             return "E3631A"
-        # Other Keysight PSUs often support INST:NSEL; default generic
         return "GENERIC"
     if "RIGOL" in s and ("DP" in s or "DL" in s):
         return "RIGOL_DP"
@@ -80,11 +80,9 @@ def _detect_psu_profile_from_idn(idn: str) -> str:
         if "HMC804" in s:
             return "RSHMC804"
         return "GENERIC"
-    # Fallback
     return "GENERIC"
 
 def _format_float(v, digits=4):
-    # Keep a reasonable resolution similar to many PSUs
     return f"{float(v):.{digits}f}"
 
 class DeviceShell:
@@ -241,14 +239,12 @@ class GeneralSCPIGUI(tk.Tk):
         else:
             choices = ["1", "2", "3", "4"]
         self.psu_chan_combo["values"] = choices
-        # keep current if still valid, else reset to first
         cur = self.psu_channel_var.get()
         if cur not in choices:
             self.psu_channel_var.set(choices[0])
 
     # ---------- devices table ----------
     def _build_devices_table_headers(self):
-        # Clear any existing
         for w in self.device_table.winfo_children():
             w.destroy()
         self.device_rows = []
@@ -267,13 +263,11 @@ class GeneralSCPIGUI(tk.Tk):
             )
             lbl.grid(row=0, column=c, sticky="nsew")
 
-        # Column expand weights
         for c, weight in enumerate([0, 1, 0, 1, 2, 3]):
             self.device_table.grid_columnconfigure(c, weight=weight)
 
     def _refresh_devices_table(self):
         self._build_devices_table_headers()
-        # Deterministic row order
         for r, resource_key in enumerate(sorted(self.sessions.keys()), start=1):
             info = self.sessions[resource_key]
             idn = info.get("idn", "")
@@ -281,37 +275,28 @@ class GeneralSCPIGUI(tk.Tk):
             n_default = info.get("label_num", "No Number")
             combined = info.get("label", "")
 
-            # index cell
             tk.Label(self.device_table, text=str(r), borderwidth=1, relief="solid", padx=4, pady=2, anchor="w").grid(row=r, column=0, sticky="nsew")
 
-            # type cell (dropdown)
             type_var = tk.StringVar(value=t_default)
             type_cb = ttk.Combobox(self.device_table, textvariable=type_var, values=LABEL_TYPES, state="readonly", width=12)
             type_cb.grid(row=r, column=1, sticky="nsew")
 
-            # number cell (dropdown)
             num_var = tk.StringVar(value=n_default if n_default in LABEL_NUMBERS else "No Number")
             num_cb = ttk.Combobox(self.device_table, textvariable=num_var, values=LABEL_NUMBERS, state="readonly", width=10)
             num_cb.grid(row=r, column=2, sticky="nsew")
 
-            # combined label (read-only)
             label_var = tk.StringVar(value=combined)
             lbl = tk.Label(self.device_table, textvariable=label_var, borderwidth=1, relief="solid", padx=6, pady=2, anchor="w")
             lbl.grid(row=r, column=3, sticky="nsew")
 
-            # resource cell
             tk.Label(self.device_table, text=resource_key, borderwidth=1, relief="solid", padx=6, pady=2, anchor="w").grid(row=r, column=4, sticky="nsew")
-
-            # idn cell
             tk.Label(self.device_table, text=idn, borderwidth=1, relief="solid", padx=6, pady=2, anchor="w").grid(row=r, column=5, sticky="nsew")
 
-            # keep bindings: whenever type/num changes, recompute combined label and update session
             def _apply_change(*_, rk=resource_key, tvar=type_var, nvar=num_var, lvar=label_var):
                 t = trim(tvar.get())
                 n = trim(nvar.get())
                 comb = combine_label(t, n)
                 lvar.set(comb)
-                # persist
                 self.sessions[rk]["label_type"] = t
                 self.sessions[rk]["label_num"] = n if n in LABEL_NUMBERS else "No Number"
                 self.sessions[rk]["label"] = comb
@@ -322,12 +307,11 @@ class GeneralSCPIGUI(tk.Tk):
             type_var.trace_add("write", _apply_change)
             num_var.trace_add("write", _apply_change)
 
-            # Store row state
             self.device_rows.append({
                 "resource": resource_key,
                 "type_var": type_var,
                 "num_var": num_var,
-                "label_var": label_var,  # read-only combined
+                "label_var": label_var,
             })
 
         self._check_labels_filled()
@@ -336,7 +320,6 @@ class GeneralSCPIGUI(tk.Tk):
         if not self.device_rows:
             self.create_btn.config(state="disabled")
             return
-        # all rows must have non-empty combined label => type chosen
         all_filled = all(trim(row["label_var"].get()) for row in self.device_rows)
         self.create_btn.config(state=("normal" if all_filled else "disabled"))
 
@@ -376,7 +359,6 @@ class GeneralSCPIGUI(tk.Tk):
         except Exception:
             return None, ""
 
-        # Base serial config (best-effort)
         try:
             inst.timeout = 500
             inst.write_timeout = 500
@@ -399,11 +381,11 @@ class GeneralSCPIGUI(tk.Tk):
             for wterm, rterm in term_candidates:
                 try:
                     if hasattr(inst, "write_termination"):
-                        inst.write_termination = wterm  # precise literal
+                        inst.write_termination = wterm
                     if hasattr(inst, "read_termination"):
-                        inst.read_termination = rterm   # precise literal
+                        inst.read_termination = rterm
                     try:
-                        inst.write("")  # nudge
+                        inst.write("")
                     except Exception:
                         pass
                     try:
@@ -442,7 +424,6 @@ class GeneralSCPIGUI(tk.Tk):
             messagebox.showinfo("No resource", "Select a VISA resource first.")
             return
 
-        # Already connected? Just activate it.
         if sel in self.sessions:
             self.connected_resource = sel
             self.inst = self.sessions[sel]["inst"].inst
@@ -466,12 +447,11 @@ class GeneralSCPIGUI(tk.Tk):
                 except Exception:
                     idn = ""
 
-            # store session and activate
             self.sessions[sel] = {
                 "inst": dev, "idn": idn,
                 "label": "",
-                "label_type": "",         # New
-                "label_num": "No Number", # New
+                "label_type": "",
+                "label_num": "No Number",
             }
             self.connected_resource = sel
             self.inst = dev.inst
@@ -517,7 +497,6 @@ class GeneralSCPIGUI(tk.Tk):
                 self._log(f"[INFO] Connected: {idn or '(no response)'} ({resource_key})")
                 connected_count += 1
 
-                # If nothing active yet, activate first successful
                 if not self.connected_resource:
                     self.connected_resource = resource_key
                     self.inst = dev.inst
@@ -538,10 +517,8 @@ class GeneralSCPIGUI(tk.Tk):
                     self.inst.close()
                 except Exception:
                     pass
-                # remove from sessions
                 if res in self.sessions:
                     try:
-                        # ensure underlying resource closed
                         self.sessions[res]["inst"].inst.close()
                     except Exception:
                         pass
@@ -642,35 +619,31 @@ class GeneralSCPIGUI(tk.Tk):
     def _psu_require_connected_ps(self):
         if not self._check_connected():
             return False
-        # Optional: encourage labeling as 'ps'
         try:
             info = self.sessions.get(self.connected_resource, {})
             if info.get("label_type", "") != "ps":
-                # Not a blocker, but helpful
                 self._log("[INFO] Active device is not labeled as 'ps'. Proceeding anyway.")
         except Exception:
             pass
         return True
 
-    def _psu_map_channel_for_e3631a(self, ch: str) -> str:
+    def _psu_map_channel_for_e3631a(self, ch: str) -> Optional[str]:
         c = trim(ch).upper()
         return _E3631A_CHANNELS.get(c, None)
 
     def _psu_select_channel_generic(self, ch: str):
-        # Generic/Rigol/R&S: INST:NSEL n
         n = trim(ch).upper().replace("CH", "")
         if not n.isdigit():
             raise ValueError("Channel must be numeric for this PSU profile.")
         self.inst.write(f"INST:NSEL {n}")
 
     def _psu_readback_generic(self, ch: str):
-        # Try VOLT? and CURR? after selecting
         self._psu_select_channel_generic(ch)
         v = self.inst.query("VOLT?").strip()
         i = self.inst.query("CURR?").strip()
         return v, i
 
-    def _psu_set_generic(self, ch: str, volt: str | None, curr: str | None):
+    def _psu_set_generic(self, ch: str, volt: Optional[str], curr: Optional[str]):
         self._psu_select_channel_generic(ch)
         cmds = []
         if volt is not None and volt != "":
@@ -690,24 +663,21 @@ class GeneralSCPIGUI(tk.Tk):
         if not out:
             raise ValueError("E3631A channel must be one of P6V/P25V/N25V or 1/2/3.")
         resp = self.inst.query(f"APPLy? {out}").strip()
-        # Response like: "x.xxxx,y.yyyy"
         try:
             v, i = resp.split(",")
             return v.strip().strip('"'), i.strip().strip('"')
         except Exception:
             return resp, ""
 
-    def _psu_set_e3631a(self, ch: str, volt: str | None, curr: str | None):
+    def _psu_set_e3631a(self, ch: str, volt: Optional[str], curr: Optional[str]):
         out = self._psu_map_channel_for_e3631a(ch)
         if not out:
             raise ValueError("E3631A channel must be one of P6V/P25V/N25V or 1/2/3.")
 
-        # If only one provided, query the other and set both (safer)
         v_to_set = None
         i_to_set = None
         if (volt is None or volt == "") or (curr is None or curr == ""):
             v_now, i_now = self._psu_readback_e3631a(out)
-            # keep current settings as fallback
             if v_now != "":
                 v_to_set = v_now
             if i_now != "":
@@ -721,7 +691,6 @@ class GeneralSCPIGUI(tk.Tk):
         if v_to_set is None and i_to_set is None:
             raise ValueError("Provide at least one of Voltage or Current.")
 
-        # SCPI requires both fields (empty allowed in some fw, but we send both to be safe)
         if v_to_set is None:
             v_to_set = "DEF"
         if i_to_set is None:
@@ -800,32 +769,25 @@ class GeneralSCPIGUI(tk.Tk):
     # ---------- script generation ----------
     @staticmethod
     def _sanitize_label(name: str) -> str:
-        """Turn arbitrary label into a safe Python attribute name."""
         name = trim(name)
         if not name:
             return ""
-        # Replace non-identifier chars with underscore
         safe = re.sub(r"\W", "_", name)
-        # If starts with digit, prefix underscore
         if re.match(r"^\d", safe):
             safe = "_" + safe
         return safe
 
     @staticmethod
     def _resource_to_value(resource: str) -> str:
-        """Map VISA resource to desired string value.
-        ASRL<n>::... -> 'COM<n>' else keep resource literal.
-        Accepts typos like ::NSTR as well."""
         m = re.match(r"^ASRL(\d+)", resource.strip(), flags=re.IGNORECASE)
         if m:
             return f"COM{m.group(1)}"
         return resource
 
     def create_scripts(self):
-        # Collect labeled devices (combined labels) and per-row type/num
         labels = []
-        items = []          # (label, resource)
-        dict_entries = []   # (type, num, KEY) where KEY is upper-case label for inst_dict
+        items = []
+        dict_entries = []
 
         for row in self.device_rows:
             label_raw = row["label_var"].get()
@@ -839,19 +801,16 @@ class GeneralSCPIGUI(tk.Tk):
             labels.append(label)
             items.append((label, row["resource"]))
 
-            # Build uppercase key for inst_dict
             key = t.upper()
             if n and n != "No Number":
                 key = f"{key}{n}"
             dict_entries.append((t, n, key))
 
-        # Check duplicates for attribute labels
         dups = {x for x in labels if labels.count(x) > 1}
         if dups:
             messagebox.showerror("Duplicate labels", f"Labels must be unique. Duplicates: {', '.join(sorted(dups))}")
             return
 
-        # Build file content
         lines = []
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         lines.append("# Auto-generated by General SCPI GUI")
@@ -860,13 +819,10 @@ class GeneralSCPIGUI(tk.Tk):
         lines.append("class TemplateConnection:")
         lines.append("    def __init__(self):")
 
-        # 1) self.<label> = ('<value>') lines
         for label, resource in items:
             value = self._resource_to_value(resource)
             lines.append(f"        self.{label} = ('{value}')")
 
-        # 2) self.inst_dict with required ordering/formatting
-        # Sort by type priority, then by number (No Number -> 0), then by KEY for stability
         def _num_val(num_str: str) -> int:
             if num_str and num_str != "No Number":
                 try:
@@ -880,20 +836,16 @@ class GeneralSCPIGUI(tk.Tk):
             key=lambda x: (TYPE_PRIORITY.get(x[0], 999), _num_val(x[1]), x[2])
         )
 
-        # Group by type preserving the sorted order
         grouped = {}
         for t, n, key in dict_entries_sorted:
             grouped.setdefault(t, []).append(key)
 
-        # If nothing to add, still create empty dict
         if dict_entries_sorted:
-            # Padding for colon alignment
             max_key_len = max(len(k) for _, _, k in dict_entries_sorted)
             def fmt_token(k: str) -> str:
                 pad = " " * (max_key_len - len(k))
                 return f"'{k}'{pad} : ['X']"
 
-            # Build lines per type in specified order
             parts = []
             for t in ["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "cont", "temp_force"]:
                 if t in grouped:

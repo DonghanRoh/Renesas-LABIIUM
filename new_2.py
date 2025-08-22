@@ -938,6 +938,12 @@ class GeneralSCPIGUI(tk.Tk):
 
 
         if dict_entries_sorted:
+            ALIGN_WIDTHS = {
+                "ps": 11, "mm": 11, "smu": 10, "fgen": 10,
+                "scope": 10, "eload": 11, "na": 10,
+                "tm": 10, "cont": 10, "temp_force": 11
+            }
+
             lines.append("        self.inst_dict = {")
             indent = " " * 18  # 줄바꿈 후 들여쓰기
 
@@ -945,15 +951,14 @@ class GeneralSCPIGUI(tk.Tk):
                 if t not in grouped:
                     continue
 
-                keys = grouped[t]
-                max_len = max(len(k) for k in keys)
+                width = ALIGN_WIDTHS.get(t, 10)
 
                 row_parts = []
-                for k in keys:
-                    pad = " " * (max_len - len(k))
-                    row_parts.append(f"'{k}'{pad} : ['X']")
+                for k in grouped[t]:
+                    pad = " " * (width - len(k))
+                    row_parts.append(f"'{k}'{pad}: ['X']")
 
-                # 같은 타입은 같은 줄에 나란히 작성
+                # 같은 타입은 한 줄에 묶어서 출력
                 if lines[-1].endswith("{"):
                     lines[-1] += row_parts[0] + ("," if len(row_parts) == 1 else ", " + ", ".join(row_parts[1:]) + ",")
                 else:
@@ -962,6 +967,7 @@ class GeneralSCPIGUI(tk.Tk):
             # 마지막 줄 닫기
             lines[-1] = lines[-1].rstrip(",")
             lines[-1] += "}"
+
 
 
         content = "\n".join(lines) + "\n"

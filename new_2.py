@@ -937,20 +937,29 @@ class GeneralSCPIGUI(tk.Tk):
             grouped.setdefault(t, []).append(key)
 
         if dict_entries_sorted:
+            # key 전체 길이를 고려해 정렬
             max_key_len = max(len(k) for _, _, k in dict_entries_sorted)
+
             def fmt_token(k: str) -> str:
                 pad = " " * (max_key_len - len(k))
                 return f"'{k}'{pad} : ['X']"
+
             parts = []
             for t in ["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "cont", "temp_force"]:
                 if t in grouped:
                     tokens = [fmt_token(k) for k in grouped[t]]
-                    parts.append(", ".join(tokens))
-            prefix = "        self.inst_dict = "; indent = " " * len(prefix)
-            combined = (",\n" + indent).join(parts)
-            lines += ["", f"{prefix}{{{combined}}}"]
+                    parts.extend(tokens)
+
+            prefix = "        self.inst_dict = {"
+            indent = " " * len(prefix)
+            # 첫 줄은 prefix + 첫 element, 그 뒤는 indent + element
+            lines += [prefix + parts[0] + ","]
+            for p in parts[1:]:
+                lines.append(indent + p + ",")
+            lines[-1] = lines[-1].rstrip(",") + "}"  # 마지막 닫기
         else:
             lines += ["", "        self.inst_dict = {}"]
+
 
         content = "\n".join(lines) + "\n"
         out_path = os.path.join(os.getcwd(), "template_connection.py")

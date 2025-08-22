@@ -945,7 +945,7 @@ class GeneralSCPIGUI(tk.Tk):
 
             lines.append("        self.inst_dict = {")
             base_indent = " " * 10      # 첫 줄 시작 들여쓰기
-            extra_indent = base_indent + " " * 8  # 두 번째 줄 이후 (8칸 더)
+            extra_indent = base_indent + " " * 16  # 두 번째 줄 이후 (8칸 더)
 
             for t in ["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "cont", "temp_force"]:
                 if t not in grouped:

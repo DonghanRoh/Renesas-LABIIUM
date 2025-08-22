@@ -668,12 +668,15 @@ class GeneralSCPIGUI(tk.Tk):
             num_cb.bind("<<ComboboxSelected>>", lambda e, rk=resource_key: self._activate_resource(rk))
 
             label_var = tk.StringVar(value=combined)
-            lbl = tk.Label(self.device_table, textvariable=label_var, borderwidth=1, relief="solid", padx=6, pady=2, anchor="w")
-            if self._row_default_bg is None:
-                self._row_default_bg = lbl.cget("bg")
-            lbl.bind("<Button-1>", lambda e, rk=resource_key: self._activate_resource(rk))
-            lbl.grid(row=r, column=3, sticky="nsew")
-            row_widgets.append(lbl)
+
+            # 입력 + 선택 둘 다 가능
+            label_cb = ttk.Combobox(self.device_table, textvariable=label_var, values=[], width=14, state="normal")
+            label_cb.grid(row=r, column=3, sticky="nsew")
+            
+            # 클릭 시 활성화 (row 클릭 효과 유지)
+            label_cb.bind("<FocusIn>", lambda e, rk=resource_key: self._activate_resource(rk))
+            
+            row_widgets.append(label_cb)
 
             row_widgets.append(self._make_clickable_cell(resource_key, r, 4, resource_key))
             row_widgets.append(self._make_clickable_cell(idn, r, 5, resource_key))

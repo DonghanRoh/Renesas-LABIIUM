@@ -31,9 +31,9 @@ COMMANDS = [
 
 QUERYABLE_BASES = {"*IDN", "*OPC", "*TST", "*ESR", "*STB", "SYST:ERR"}
 
-LABEL_TYPES = ["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "cont", "temp_force"]
+LABEL_TYPES = ["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "temp_force"]
 LABEL_NUMBERS = ["No Number", "1", "2", "3", "4", "5"]
-TYPE_PRIORITY = {t: i for i, t in enumerate(["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "cont", "temp_force"])}
+TYPE_PRIORITY = {t: i for i, t in enumerate(["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "temp_force"])}
 
 def combine_label(t: str, n: str) -> str:
     t = trim(t); n = trim(n)
@@ -940,14 +940,14 @@ class GeneralSCPIGUI(tk.Tk):
             ALIGN_WIDTHS = {
                 "ps": 10, "mm": 10, "smu": 10, "fgen": 10,
                 "scope": 10, "eload": 11, "na": 10,
-                "tm": 10, "cont": 10, "temp_force": 11
+                "tm": 10, "temp_force": 11
             }
 
             lines.append("        self.inst_dict = {")
             base_indent = " " * 10      # 첫 줄 시작 들여쓰기
             extra_indent = base_indent + " " * 16  # 두 번째 줄 이후 (8칸 더)
 
-            for t in ["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "cont", "temp_force"]:
+            for t in ["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "temp_force"]:
                 if t not in grouped:
                     continue
 

@@ -689,15 +689,30 @@ class GeneralSCPIGUI(tk.Tk):
             row_widgets.append(self._make_clickable_cell(idn, r, 5, resource_key))
 
             def _apply_change(*_, rk=resource_key, tvar=type_var, nvar=num_var, lvar=label_var):
-                t = trim(tvar.get()); n = trim(nvar.get()); user_label = trim(lvar.get())
+                t = trim(tvar.get())
+                n = trim(nvar.get())
+                current_label = trim(lvar.get())
+            
                 auto_label = combine_label(t, n)
-                label_final = user_label if user_label else auto_label
-                lvar.set(label_final)
+            
+                # 만약 현재 라벨이 비어 있거나, 이전 자동 생성값과 동일하면 -> 새 auto_label 반영
+                if not current_label or current_label == self.sessions[rk].get("auto_label", ""):
+                    lvar.set(auto_label)
+                    self.sessions[rk]["label"] = auto_label
+                else:
+                    # 사용자가 직접 입력한 라벨이면 그대로 유지
+                    self.sessions[rk]["label"] = current_label
+            
+                # 최신 auto_label 저장 (다음 변경 시 비교용)
+                self.sessions[rk]["auto_label"] = auto_label
+            
                 self.sessions[rk]["label_type"] = t
                 self.sessions[rk]["label_num"] = n if n in LABEL_NUMBERS else "No Number"
-                self.sessions[rk]["label"] = label_final
-                if rk == self.connected_resource: self._update_idn_banner()
+            
+                if rk == self.connected_resource:
+                    self._update_idn_banner()
                 self._check_labels_filled()
+
 
             type_var.trace_add("write", _apply_change)
             num_var.trace_add("write", _apply_change)

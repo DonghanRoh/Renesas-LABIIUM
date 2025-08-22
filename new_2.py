@@ -285,9 +285,36 @@ class GeneralSCPIGUI(tk.Tk):
                 return True
             except Exception as e:
                 last_err = e
-                # try next sequence
         if last_err:
             raise last_err
+        return False
+
+    # ---------- robust try: check SYST:ERR? after each sequence ----------
+    def _try_sequences_checking_error(self, sequences):
+        """
+        Try sequences; after each sequence, read SYST:ERR? and proceed only if '0' (no error).
+        If nonzero (e.g., -113), continue to next sequence.
+        """
+        last_exc = None
+        for seq in sequences:
+            try:
+                for cmd in seq:
+                    self.inst.write(cmd)
+                # check error
+                try:
+                    err = self.inst.query("SYST:ERR?").strip()
+                    self._log(f"[CHK] SYST:ERR? -> {err}")
+                    if err.startswith("0") or err.upper().startswith("+0") or "No error" in err:
+                        return True
+                    # else: try next sequence
+                except Exception:
+                    # If we cannot query, assume success
+                    return True
+            except Exception as e:
+                last_exc = e
+                continue
+        if last_exc:
+            raise last_exc
         return False
 
     # ---------- small helper for SCPI errors ----------
@@ -316,7 +343,6 @@ class GeneralSCPIGUI(tk.Tk):
 
             idn_up = (idn or "").upper()
             if "MODEL 2000" in idn_up:
-                # Keithley Model 2000: TEXT:DATA then TEXT:STAT ON
                 cmds = [
                     "DISP:ENAB ON",
                     f"DISP:TEXT:DATA '{msg}'",
@@ -326,7 +352,6 @@ class GeneralSCPIGUI(tk.Tk):
                     self.inst.write(c)
                 self._log_scpi_error_if_any("[DMM]")
             else:
-                # Keysight 3441x/3446x and similar: try common sequences
                 sequences = [
                     [f"DISP:TEXT:STAT ON", f"DISP:TEXT '{msg}'"],
                     [f"DISPlay:TEXT:STATe ON", f"DISPlay:TEXT '{msg}'"],
@@ -376,7 +401,7 @@ class GeneralSCPIGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("DMM Clear Label failed", str(e))
 
-    # ---------- SMU ops (FIXED for 2450/2440) ----------
+    # ---------- SMU ops (UPDATED for 2450/2460/2461) ----------
     def smu_show_label(self):
         try:
             if not self._check_connected(): return
@@ -394,19 +419,18 @@ class GeneralSCPIGUI(tk.Tk):
             msg = label_text.replace("'", "''")
             idn_up = (idn or "").upper()
 
-            if "2450" in idn_up or "2460" in idn_up or "2461" in idn_up:
-                # Keithley Graphical SMUs — use USER swipe screen
-                # Order matters: define text first, then switch to SWIPE_USER.
+            if any(m in idn_up for m in ("2450", "2460", "2461")):
+                # 2450계열: 텍스트 먼저 -> USER 화면 전환. 에러면 2400 스타일 폴백.
                 seqs = [
-                    ["DISP:ENAB ON", "DISP:CLE", f"DISP:USER1:TEXT '{msg}'", "DISP:SCR SWIPE_USER"],
-                    # Fallback: some firmware accept USER (rare)
-                    ["DISP:ENAB ON", "DISP:CLE", f"DISP:USER1:TEXT '{msg}'", "DISP:SCReen USER"],
+                    ["DISP:ENAB ON", f"DISP:USER1:TEXT '{msg}'", "DISPlay:SCReen USER"],
+                    ["DISPlay:ENABle ON", f"DISPlay:USER1:TEXT '{msg}'", "DISPlay:SCReen USER"],
+                    [f"DISP:WIND:TEXT:DATA '{msg}'", "DISP:WIND:TEXT:STAT ON"],
+                    [f"DISPlay:WINDow:TEXT:DATA '{msg}'", "DISPlay:WINDow:TEXT:STATe ON"],
                 ]
-                self._dmm_try_sequences(seqs)
+                self._try_sequences_checking_error(seqs)
                 self._log_scpi_error_if_any("[SMU-2450/60/61]")
 
             elif "2420" in idn_up or "2440" in idn_up:
-                # Classic 2400-series — use WINDOW text (no index)
                 seqs = [
                     ["DISP:ENAB ON", f"DISP:WIND:TEXT:DATA '{msg}'", "DISP:WIND:TEXT:STAT ON"],
                     ["DISPlay:ENABle ON", f"DISPlay:WINDow:TEXT:DATA '{msg}'", "DISPlay:WINDow:TEXT:STATe ON"],
@@ -415,12 +439,11 @@ class GeneralSCPIGUI(tk.Tk):
                 self._log_scpi_error_if_any("[SMU-2400]")
 
             else:
-                # Generic fallbacks (should rarely be used)
                 seqs = [
-                    ["DISP:ENAB ON", f"DISP:USER1:TEXT '{msg}'", "DISP:SCR SWIPE_USER"],
+                    ["DISP:ENAB ON", f"DISP:USER1:TEXT '{msg}'", "DISP:SCReen USER"],
                     [f"DISP:WIND:TEXT:DATA '{msg}'", "DISP:WIND:TEXT:STAT ON"],
                 ]
-                self._dmm_try_sequences(seqs)
+                self._try_sequences_checking_error(seqs)
                 self._log_scpi_error_if_any("[SMU-generic]")
 
             self._log(f"[SMU] Show Label -> '{label_text}' | IDN={idn}")
@@ -437,12 +460,13 @@ class GeneralSCPIGUI(tk.Tk):
                 return
 
             idn_up = (idn or "").upper()
-            if "2450" in idn_up or "2460" in idn_up or "2461" in idn_up:
+            if any(m in idn_up for m in ("2450", "2460", "2461")):
                 seqs = [
-                    ["DISP:CLE", "DISP:SCR HOME"],                   # clear USER text and go back home
-                    ["DISP:USER1:TEXT ''", "DISP:USER2:TEXT ''"],    # extra cleanup if needed
+                    ["DISP:USER1:TEXT ''", "DISPlay:SCReen HOME"],
+                    ["DISP:WIND:TEXT:STAT OFF", "DISP:WIND:TEXT:DATA ''"],
+                    ["DISPlay:WINDow:TEXT:STATe OFF", "DISPlay:WINDow:TEXT:DATA ''"],
                 ]
-                self._dmm_try_sequences(seqs)
+                self._try_sequences_checking_error(seqs)
                 self._log_scpi_error_if_any("[SMU-2450/60/61]")
 
             elif "2420" in idn_up or "2440" in idn_up:
@@ -455,10 +479,10 @@ class GeneralSCPIGUI(tk.Tk):
 
             else:
                 seqs = [
-                    ["DISP:TEXT:CLEar"],
-                    ["DISP:CLE"],
+                    ["DISP:USER1:TEXT ''", "DISP:SCReen HOME"],
+                    ["DISP:WIND:TEXT:STAT OFF", "DISP:WIND:TEXT:DATA ''"],
                 ]
-                self._dmm_try_sequences(seqs)
+                self._try_sequences_checking_error(seqs)
                 self._log_scpi_error_if_any("[SMU-generic]")
 
             self._log(f"[SMU] Clear Label | IDN={idn}")

@@ -936,29 +936,32 @@ class GeneralSCPIGUI(tk.Tk):
         for t, n, key in dict_entries_sorted:
             grouped.setdefault(t, []).append(key)
 
+
         if dict_entries_sorted:
-            # key 전체 길이를 고려해 정렬
-            max_key_len = max(len(k) for _, _, k in dict_entries_sorted)
+            lines.append("        self.inst_dict = {")
+            indent = " " * 18  # 줄바꿈 후 들여쓰기
 
-            def fmt_token(k: str) -> str:
-                pad = " " * (max_key_len - len(k))
-                return f"'{k}'{pad} : ['X']"
-
-            parts = []
             for t in ["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "cont", "temp_force"]:
-                if t in grouped:
-                    tokens = [fmt_token(k) for k in grouped[t]]
-                    parts.extend(tokens)
+                if t not in grouped:
+                    continue
 
-            prefix = "        self.inst_dict = {"
-            indent = " " * len(prefix)
-            # 첫 줄은 prefix + 첫 element, 그 뒤는 indent + element
-            lines += [prefix + parts[0] + ","]
-            for p in parts[1:]:
-                lines.append(indent + p + ",")
-            lines[-1] = lines[-1].rstrip(",") + "}"  # 마지막 닫기
-        else:
-            lines += ["", "        self.inst_dict = {}"]
+                keys = grouped[t]
+                max_len = max(len(k) for k in keys)
+
+                row_parts = []
+                for k in keys:
+                    pad = " " * (max_len - len(k))
+                    row_parts.append(f"'{k}'{pad} : ['X']")
+
+                # 같은 타입은 같은 줄에 나란히 작성
+                if lines[-1].endswith("{"):
+                    lines[-1] += row_parts[0] + ("," if len(row_parts) == 1 else ", " + ", ".join(row_parts[1:]) + ",")
+                else:
+                    lines.append(indent + row_parts[0] + ("," if len(row_parts) == 1 else ", " + ", ".join(row_parts[1:]) + ","))
+
+            # 마지막 줄 닫기
+            lines[-1] = lines[-1].rstrip(",")
+            lines[-1] += "}"
 
 
         content = "\n".join(lines) + "\n"

@@ -939,7 +939,7 @@ class GeneralSCPIGUI(tk.Tk):
 
         if dict_entries_sorted:
             ALIGN_WIDTHS = {
-                "ps": 11, "mm": 11, "smu": 10, "fgen": 10,
+                "ps": 10, "mm": 10, "smu": 10, "fgen": 10,
                 "scope": 10, "eload": 11, "na": 10,
                 "tm": 10, "cont": 10, "temp_force": 11
             }

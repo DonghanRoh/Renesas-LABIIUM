@@ -289,39 +289,18 @@ class GeneralSCPIGUI(tk.Tk):
             raise last_err
         return False
 
-    # ---------- robust try: check SYST:ERR? after each sequence ----------
-    def _try_sequences_checking_error(self, sequences):
+    # ---------- error queue helpers ----------
+    def _drain_error_queue(self, prefix="[SCPI]"):
         """
-        Try sequences; after each sequence, read SYST:ERR? and proceed only if '0' (no error).
-        If nonzero (e.g., -113), continue to next sequence.
+        Drain SYST:ERR? queue until '0' or max 10 reads.
+        This avoids old queued errors triggering front-panel popups later.
         """
-        last_exc = None
-        for seq in sequences:
-            try:
-                for cmd in seq:
-                    self.inst.write(cmd)
-                # check error
-                try:
-                    err = self.inst.query("SYST:ERR?").strip()
-                    self._log(f"[CHK] SYST:ERR? -> {err}")
-                    if err.startswith("0") or err.upper().startswith("+0") or "No error" in err:
-                        return True
-                    # else: try next sequence
-                except Exception:
-                    # If we cannot query, assume success
-                    return True
-            except Exception as e:
-                last_exc = e
-                continue
-        if last_exc:
-            raise last_exc
-        return False
-
-    # ---------- small helper for SCPI errors ----------
-    def _log_scpi_error_if_any(self, prefix="[SCPI]"):
         try:
-            err = self.inst.query("SYST:ERR?").strip()
-            self._log(f"{prefix} SYST:ERR? -> {err}")
+            for _ in range(10):
+                err = self.inst.query("SYST:ERR?").strip()
+                self._log(f"{prefix} SYST:ERR? -> {err}")
+                if err.startswith("0") or err.upper().startswith("+0") or "No error" in err:
+                    break
         except Exception:
             pass
 
@@ -350,7 +329,7 @@ class GeneralSCPIGUI(tk.Tk):
                 ]
                 for c in cmds:
                     self.inst.write(c)
-                self._log_scpi_error_if_any("[DMM]")
+                self._drain_error_queue("[DMM]")
             else:
                 sequences = [
                     [f"DISP:TEXT:STAT ON", f"DISP:TEXT '{msg}'"],
@@ -361,6 +340,7 @@ class GeneralSCPIGUI(tk.Tk):
                     [f"DISP:WIND1:TEXT '{msg}'"],
                 ]
                 self._dmm_try_sequences(sequences)
+                self._drain_error_queue("[DMM]")
 
             self._log(f"[DMM] Show Label -> '{label_text}' | IDN={idn}")
             self.status.set("DMM label shown.")
@@ -384,7 +364,7 @@ class GeneralSCPIGUI(tk.Tk):
                 ]
                 for c in cmds:
                     self.inst.write(c)
-                self._log_scpi_error_if_any("[DMM]")
+                self._drain_error_queue("[DMM]")
             else:
                 sequences = [
                     ["DISP:TEXT:CLEar"],
@@ -395,13 +375,14 @@ class GeneralSCPIGUI(tk.Tk):
                     ["DISP:WIND:TEXT:CLEar"],
                 ]
                 self._dmm_try_sequences(sequences)
+                self._drain_error_queue("[DMM]")
 
             self._log(f"[DMM] Clear Label | IDN={idn}")
             self.status.set("DMM label cleared.")
         except Exception as e:
             messagebox.showerror("DMM Clear Label failed", str(e))
 
-    # ---------- SMU ops (UPDATED for 2450/2460/2461) ----------
+    # ---------- SMU ops ----------
     def smu_show_label(self):
         try:
             if not self._check_connected(): return
@@ -420,31 +401,37 @@ class GeneralSCPIGUI(tk.Tk):
             idn_up = (idn or "").upper()
 
             if any(m in idn_up for m in ("2450", "2460", "2461")):
-                # 2450계열: 텍스트 먼저 -> USER 화면 전환. 에러면 2400 스타일 폴백.
-                seqs = [
-                    ["DISP:ENAB ON", f"DISP:USER1:TEXT '{msg}'", "DISPlay:SCReen USER"],
-                    ["DISPlay:ENABle ON", f"DISPlay:USER1:TEXT '{msg}'", "DISPlay:SCReen USER"],
-                    [f"DISP:WIND:TEXT:DATA '{msg}'", "DISP:WIND:TEXT:STAT ON"],
-                    [f"DISPlay:WINDow:TEXT:DATA '{msg}'", "DISPlay:WINDow:TEXT:STATe ON"],
-                ]
-                self._try_sequences_checking_error(seqs)
-                self._log_scpi_error_if_any("[SMU-2450/60/61]")
+                # 2450/60/61: 오직 이 3줄만 보낸다 (폴백 금지)
+                self._drain_error_queue("[SMU-2450] PRE")  # 과거 오류 비우기
+                self.inst.write("DISP:ENAB ON")
+                self.inst.write(f"DISP:USER1:TEXT '{msg}'")
+                self.inst.write("DISPlay:SCReen USER")
+                self._drain_error_queue("[SMU-2450] POST")
 
             elif "2420" in idn_up or "2440" in idn_up:
-                seqs = [
+                # 구 2400 계열: WINDOW 텍스트
+                sequences = [
                     ["DISP:ENAB ON", f"DISP:WIND:TEXT:DATA '{msg}'", "DISP:WIND:TEXT:STAT ON"],
                     ["DISPlay:ENABle ON", f"DISPlay:WINDow:TEXT:DATA '{msg}'", "DISPlay:WINDow:TEXT:STATe ON"],
                 ]
-                self._dmm_try_sequences(seqs)
-                self._log_scpi_error_if_any("[SMU-2400]")
+                self._dmm_try_sequences(sequences)
+                self._drain_error_queue("[SMU-2400]")
 
             else:
-                seqs = [
-                    ["DISP:ENAB ON", f"DISP:USER1:TEXT '{msg}'", "DISP:SCReen USER"],
-                    [f"DISP:WIND:TEXT:DATA '{msg}'", "DISP:WIND:TEXT:STAT ON"],
-                ]
-                self._try_sequences_checking_error(seqs)
-                self._log_scpi_error_if_any("[SMU-generic]")
+                # 기타: 2450 스타일 우선 시도, 실패 시 2400 스타일
+                try:
+                    self._drain_error_queue("[SMU] PRE")
+                    self.inst.write("DISP:ENAB ON")
+                    self.inst.write(f"DISP:USER1:TEXT '{msg}'")
+                    self.inst.write("DISPlay:SCReen USER")
+                    self._drain_error_queue("[SMU] POST")
+                except Exception:
+                    sequences = [
+                        [f"DISP:WIND:TEXT:DATA '{msg}'", "DISP:WIND:TEXT:STAT ON"],
+                        [f"DISPlay:WINDow:TEXT:DATA '{msg}'", "DISPlay:WINDow:TEXT:STATe ON"],
+                    ]
+                    self._dmm_try_sequences(sequences)
+                    self._drain_error_queue("[SMU] POST-FB")
 
             self._log(f"[SMU] Show Label -> '{label_text}' | IDN={idn}")
             self.status.set("SMU label shown.")
@@ -461,29 +448,33 @@ class GeneralSCPIGUI(tk.Tk):
 
             idn_up = (idn or "").upper()
             if any(m in idn_up for m in ("2450", "2460", "2461")):
-                seqs = [
-                    ["DISP:USER1:TEXT ''", "DISPlay:SCReen HOME"],
-                    ["DISP:WIND:TEXT:STAT OFF", "DISP:WIND:TEXT:DATA ''"],
-                    ["DISPlay:WINDow:TEXT:STATe OFF", "DISPlay:WINDow:TEXT:DATA ''"],
-                ]
-                self._try_sequences_checking_error(seqs)
-                self._log_scpi_error_if_any("[SMU-2450/60/61]")
+                # 2450/60/61: 최소 커맨드만
+                self._drain_error_queue("[SMU-2450] PRE")
+                self.inst.write("DISP:USER1:TEXT ''")
+                self.inst.write("DISPlay:SCReen HOME")
+                self._drain_error_queue("[SMU-2450] POST")
 
             elif "2420" in idn_up or "2440" in idn_up:
-                seqs = [
+                sequences = [
                     ["DISP:WIND:TEXT:STAT OFF", "DISP:WIND:TEXT:DATA ''"],
                     ["DISPlay:WINDow:TEXT:STATe OFF", "DISPlay:WINDow:TEXT:DATA ''"],
                 ]
-                self._dmm_try_sequences(seqs)
-                self._log_scpi_error_if_any("[SMU-2400]")
+                self._dmm_try_sequences(sequences)
+                self._drain_error_queue("[SMU-2400]")
 
             else:
-                seqs = [
-                    ["DISP:USER1:TEXT ''", "DISP:SCReen HOME"],
-                    ["DISP:WIND:TEXT:STAT OFF", "DISP:WIND:TEXT:DATA ''"],
-                ]
-                self._try_sequences_checking_error(seqs)
-                self._log_scpi_error_if_any("[SMU-generic]")
+                try:
+                    self._drain_error_queue("[SMU] PRE")
+                    self.inst.write("DISP:USER1:TEXT ''")
+                    self.inst.write("DISPlay:SCReen HOME")
+                    self._drain_error_queue("[SMU] POST")
+                except Exception:
+                    sequences = [
+                        ["DISP:WIND:TEXT:STAT OFF", "DISP:WIND:TEXT:DATA ''"],
+                        ["DISPlay:WINDow:TEXT:STATe OFF", "DISPlay:WINDow:TEXT:DATA ''"],
+                    ]
+                    self._dmm_try_sequences(sequences)
+                    self._drain_error_queue("[SMU] POST-FB")
 
             self._log(f"[SMU] Clear Label | IDN={idn}")
             self.status.set("SMU label cleared.")

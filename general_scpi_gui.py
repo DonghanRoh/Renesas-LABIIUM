@@ -936,7 +936,6 @@ class GeneralSCPIGUI(tk.Tk):
         for t, n, key in dict_entries_sorted:
             grouped.setdefault(t, []).append(key)
 
-
         if dict_entries_sorted:
             ALIGN_WIDTHS = {
                 "ps": 10, "mm": 10, "smu": 10, "fgen": 10,
@@ -945,7 +944,8 @@ class GeneralSCPIGUI(tk.Tk):
             }
 
             lines.append("        self.inst_dict = {")
-            indent = " " * 18  # 줄바꿈 후 들여쓰기
+            base_indent = " " * 10      # 첫 줄 시작 들여쓰기
+            extra_indent = base_indent + " " * 8  # 두 번째 줄 이후 (8칸 더)
 
             for t in ["ps", "mm", "smu", "fgen", "scope", "eload", "na", "tm", "cont", "temp_force"]:
                 if t not in grouped:
@@ -958,16 +958,22 @@ class GeneralSCPIGUI(tk.Tk):
                     pad = " " * (width - len(k))
                     row_parts.append(f"'{k}'{pad}: ['X']")
 
-                # 같은 타입은 한 줄에 묶어서 출력
+                # 첫 번째 줄은 base_indent 사용
                 if lines[-1].endswith("{"):
-                    lines[-1] += row_parts[0] + ("," if len(row_parts) == 1 else ", " + ", ".join(row_parts[1:]) + ",")
+                    lines[-1] += row_parts[0] + (
+                        "," if len(row_parts) == 1 else ", " + ", ".join(row_parts[1:]) + ","
+                    )
                 else:
-                    lines.append(indent + row_parts[0] + ("," if len(row_parts) == 1 else ", " + ", ".join(row_parts[1:]) + ","))
+                    # 두 번째 줄 이후는 extra_indent 사용
+                    lines.append(
+                        extra_indent + row_parts[0] + (
+                            "," if len(row_parts) == 1 else ", " + ", ".join(row_parts[1:]) + ","
+                        )
+                    )
 
             # 마지막 줄 닫기
             lines[-1] = lines[-1].rstrip(",")
             lines[-1] += "}"
-
 
 
         content = "\n".join(lines) + "\n"

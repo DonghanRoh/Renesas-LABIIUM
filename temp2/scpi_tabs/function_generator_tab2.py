@@ -29,14 +29,19 @@ class FunctionGeneratorTab:
         # State vars
         self.model_var     = tk.StringVar(value="")
         self.waveform_var  = tk.StringVar(value="SIN")
-        self.freq_var      = tk.StringVar(value="1000")   # Hz
-        self.amp_var       = tk.StringVar(value="1.0")    # amplitude value
-        self.amp_unit_var  = tk.StringVar(value="VPP")    # VPP | VRMS | DBM
-        self.offset_var    = tk.StringVar(value="0.0")    # V
-        self.phase_var     = tk.StringVar(value="0.0")    # deg
-        self.duty_var      = tk.StringVar(value="50")     # %
-        self.load_var      = tk.StringVar(value="INF")    # 50 | INF | <ohms>
-        self.ch_var        = tk.StringVar(value="1")      # 33612A: 1 or 2
+        self.freq_var      = tk.StringVar(value="1000")    # Hz
+        self.amp_var       = tk.StringVar(value="1.0")     # amplitude value
+        self.amp_unit_var  = tk.StringVar(value="VPP")     # VPP | VRMS | DBM
+        self.offset_var    = tk.StringVar(value="0.0")     # V
+        self.phase_var     = tk.StringVar(value="0.0")     # deg
+        self.duty_var      = tk.StringVar(value="50")      # %
+        self.load_var      = tk.StringVar(value="INF")     # 50 | INF | <ohms>
+        self.ch_var        = tk.StringVar(value="1")       # 33612A: 1 or 2
+
+        # PULSE-specific
+        self.pulse_width_var = tk.StringVar(value="0.001")    # s
+        self.pulse_lead_var  = tk.StringVar(value="1e-8")     # s (leading edge time)
+        self.pulse_trail_var = tk.StringVar(value="1e-8")     # s (trailing edge time)
 
         self._build_ui(self.frame)
         self._wire_field_enable_logic()
@@ -52,7 +57,6 @@ class FunctionGeneratorTab:
 
         self.ch_label = ttk.Label(f, text="Channel:")
         self.ch_combo = ttk.Combobox(f, textvariable=self.ch_var, state="readonly", values=["1", "2"], width=6)
-
         self.ch_label.grid(row=0, column=2, padx=6, pady=8, sticky="e")
         self.ch_combo.grid(row=0, column=3, padx=(0,12), pady=8, sticky="w")
 
@@ -88,14 +92,29 @@ class FunctionGeneratorTab:
         ttk.Label(f, text="Load (Ω):").grid(row=3, column=0, padx=6, pady=8, sticky="e")
         ttk.Entry(f, textvariable=self.load_var, width=12).grid(row=3, column=1, padx=(0,12), pady=8, sticky="w")
 
-        # Row 3: Buttons
-        ttk.Button(f, text="Apply", command=self.apply).grid(row=3, column=2, padx=6, pady=8)
-        ttk.Button(f, text="Output ON", command=lambda: self.output(True)).grid(row=3, column=3, padx=6, pady=8)
-        ttk.Button(f, text="Output OFF", command=lambda: self.output(False)).grid(row=3, column=4, padx=6, pady=8)
-        ttk.Button(f, text="Read Back", command=self.read_back).grid(row=3, column=5, padx=6, pady=8)
+        # --- Pulse-only group ---
+        self.pulsef = ttk.LabelFrame(parent, text="Pulse Parameters (when Waveform = PULSE)")
+        self.pulsef.pack(fill="x", padx=10, pady=(0,10))
+
+        ttk.Label(self.pulsef, text="Width (s):").grid(row=0, column=0, padx=6, pady=8, sticky="e")
+        ttk.Entry(self.pulsef, textvariable=self.pulse_width_var, width=14).grid(row=0, column=1, padx=(0,12), pady=8, sticky="w")
+
+        ttk.Label(self.pulsef, text="Leading edge (s):").grid(row=0, column=2, padx=6, pady=8, sticky="e")
+        ttk.Entry(self.pulsef, textvariable=self.pulse_lead_var, width=14).grid(row=0, column=3, padx=(0,12), pady=8, sticky="w")
+
+        ttk.Label(self.pulsef, text="Trailing edge (s):").grid(row=0, column=4, padx=6, pady=8, sticky="e")
+        ttk.Entry(self.pulsef, textvariable=self.pulse_trail_var, width=14).grid(row=0, column=5, padx=(0,12), pady=8, sticky="w")
 
         for c, w in enumerate([0,1,0,1,0,1]):
-            f.grid_columnconfigure(c, weight=w)
+            self.pulsef.grid_columnconfigure(c, weight=w)
+
+        # Row 3: Buttons
+        btns = ttk.Frame(parent)
+        btns.pack(fill="x", padx=10, pady=(0,10))
+        ttk.Button(btns, text="Apply", command=self.apply).pack(side="left", padx=6)
+        ttk.Button(btns, text="Output ON", command=lambda: self.output(True)).pack(side="left", padx=6)
+        ttk.Button(btns, text="Output OFF", command=lambda: self.output(False)).pack(side="left", padx=6)
+        ttk.Button(btns, text="Read Back", command=self.read_back).pack(side="left", padx=6)
 
     def _wire_field_enable_logic(self):
         def _on_wave_change(*_):
@@ -104,28 +123,36 @@ class FunctionGeneratorTab:
             dc = (wave == "DC")
             # SQU/PULSE: duty 활성
             needs_duty = (wave in ("SQU", "PULSE"))
+            # PULSE: pulsef 표시
+            show_pulse = (wave == "PULSE")
 
-            # Enable/disable by state
+            # Enable/disable freq/amp fields
             new_state = "disabled" if dc else "normal"
             for var_widget in self._widgets_freq_amp():
                 try: var_widget.config(state=new_state)
                 except Exception: pass
 
+            # duty
             try: self.duty_entry.config(state=("normal" if needs_duty else "disabled"))
             except Exception: pass
+
+            # pulse group show/hide
+            if show_pulse:
+                try: self.pulsef.pack(fill="x", padx=10, pady=(0,10))
+                except Exception: pass
+            else:
+                try: self.pulsef.pack_forget()
+                except Exception: pass
 
         self.wave_combo.bind("<<ComboboxSelected>>", _on_wave_change)
         # initialize once
         self.frame.after(0, _on_wave_change)
 
     def _widgets_freq_amp(self):
-        # Find the widgets by a simple traversal; here we rely on the entries added in build
-        # Safer: return all Entries bound to self.freq_var and self.amp_var and the amp unit combobox
         entries = []
         def walk(w):
             for ch in w.winfo_children():
                 try:
-                    # crude: Entry with textvariable matching our StringVars
                     if isinstance(ch, ttk.Entry):
                         tv = ch.cget("textvariable")
                         if tv in (str(self.freq_var), str(self.amp_var)):
@@ -134,8 +161,7 @@ class FunctionGeneratorTab:
                     pass
                 walk(ch)
         walk(self.frame)
-        # also amp unit combo
-        # find Combobox with variable amp_unit_var
+        # amp unit combobox
         def find_amp_unit(w):
             for ch in w.winfo_children():
                 try:
@@ -202,7 +228,7 @@ class FunctionGeneratorTab:
             if ch not in ("1", "2"):
                 ch = "1"
             return f"SOUR{ch}:"
-        # 33250A is single-channel; often bare commands (no SOUR prefix) are fine.
+        # 33250A is single-channel; usually bare commands are fine.
         return ""
 
     def _outp(self) -> str:
@@ -230,15 +256,19 @@ class FunctionGeneratorTab:
             load_raw = (self.load_var.get() or "INF").strip().upper()
             unit = (self.amp_unit_var.get() or "VPP").upper()
 
-            # ---- APPL / basic setup ----
-            # DC 파형은 장비마다 포맷 차이 → 시퀀스로 시도
+            # PULSE-specific numbers
+            p_wid  = _fnum(self.pulse_width_var, 0.0)
+            p_lead = _fnum(self.pulse_lead_var, 0.0)
+            p_trai = _fnum(self.pulse_trail_var, 0.0)
+
             srcp = self._srcp()
 
+            # ---- APPL / basic setup ----
             if wave == "DC":
                 sequences = [
                     [f"{srcp}APPL:DC DEF,DEF,{offs}"],
                     [f"{srcp}FUNC DC", f"{srcp}VOLT:OFFS {offs}"],
-                    [f"APPL:DC {offs}"],  # 33250A 호환
+                    [f"APPL:DC {offs}"],
                 ]
             else:
                 sequences = [
@@ -249,44 +279,70 @@ class FunctionGeneratorTab:
             common.try_sequences(inst, sequences)
 
             # ---- Amplitude unit (if supported) ----
-            # Keysight 계열: VOLT:UNIT {VPP|VRMS|DBM}
             try:
                 inst.write(f"{srcp}VOLT:UNIT {unit}")
             except Exception:
-                # 일부 구형 FW/모델에서 미지원 → 무시
                 pass
 
-            # ---- Duty for SQU/PULSE ----
-            if wave in ("SQU", "PULSE"):
-                try:
-                    inst.write(f"{srcp}FUNC:SQU:DCYC {duty}")
-                except Exception:
-                    try:
-                        inst.write(f"{srcp}PULS:DCYC {duty}")
-                    except Exception:
-                        try:
-                            inst.write(f"FUNC:SQU:DCYC {duty}")
-                        except Exception:
-                            pass
+            # ---- Duty for SQU/PULSE (prefer width for PULSE if provided) ----
+            if wave == "PULSE":
+                # Width
+                if p_wid > 0:
+                    common.try_sequences(inst, [
+                        [f"{srcp}PULS:WIDT {p_wid}"],
+                        [f"{srcp}FUNC:PULS:WIDT {p_wid}"],
+                        ["PULS:WIDT {0}".format(p_wid)],
+                        ["FUNC:PULS:WIDT {0}".format(p_wid)],
+                    ])
+                else:
+                    # Duty fallback only if width not specified
+                    common.try_sequences(inst, [
+                        [f"{srcp}PULS:DCYC {duty}"],
+                        [f"{srcp}FUNC:PULS:DCYC {duty}"],
+                        [f"{srcp}FUNC:SQU:DCYC {duty}"],
+                        ["PULS:DCYC {0}".format(duty)],
+                        ["FUNC:SQU:DCYC {0}".format(duty)],
+                    ])
+
+                # Edges (Leading/Trailing)
+                if p_lead > 0:
+                    common.try_sequences(inst, [
+                        [f"{srcp}PULS:TRAN:LEAD {p_lead}"],
+                        [f"{srcp}PULS:TRAN:LEADing {p_lead}"],
+                        ["PULS:TRAN:LEAD {0}".format(p_lead)],
+                        ["PULS:TRAN:LEADing {0}".format(p_lead)],
+                    ])
+                if p_trai > 0:
+                    common.try_sequences(inst, [
+                        [f"{srcp}PULS:TRAN:TRA {p_trai}"],
+                        [f"{srcp}PULS:TRAN:TRAiling {p_trai}"],
+                        ["PULS:TRAN:TRA {0}".format(p_trai)],
+                        ["PULS:TRAN:TRAiling {0}".format(p_trai)],
+                    ])
+
+            elif wave == "SQU":
+                # Square duty
+                common.try_sequences(inst, [
+                    [f"{srcp}FUNC:SQU:DCYC {duty}"],
+                    [f"{srcp}PULS:DCYC {duty}"],
+                    ["FUNC:SQU:DCYC {0}".format(duty)],
+                    ["PULS:DCYC {0}".format(duty)],
+                ])
 
             # ---- Phase ----
-            # Model 별로 PHAS 또는 FUNC:PHAS 지원
             try:
                 inst.write(f"{srcp}PHAS {pha}")
             except Exception:
                 try:
                     inst.write(f"{srcp}FUNC:PHAS {pha}")
                 except Exception:
-                    # 구형/제한 모델은 무시
                     pass
 
             # ---- Load/Impedance ----
             outp = self._outp()
             try:
-                # 숫자 또는 INF
                 val = load_raw
                 if load_raw not in ("INF", "INFinity"):
-                    # validate numeric
                     _ = float(common.extract_number(load_raw))
                     val = load_raw
                 inst.write(f"{outp}LOAD {val}")
@@ -296,7 +352,8 @@ class FunctionGeneratorTab:
             common.drain_error_queue(inst, self.log, "[FGEN]")
             self.log(f"[FGEN] Apply -> ({'33612A' if self._is_33612a else '33250A'}) "
                      f"CH={self.ch_var.get() if self._is_33612a else '1'}, "
-                     f"W={wave}, F={freq}, A={amp} {unit}, O={offs}, P={pha}, D={duty}, L={load_raw}")
+                     f"W={wave}, F={freq}, A={amp} {unit}, O={offs}, P={pha}, "
+                     f"D={duty}, L={load_raw}, PW={p_wid}, LE={p_lead}, TE={p_trai}")
             self.status.set("FGEN settings applied.")
         except Exception as e:
             messagebox.showerror("FGEN Apply failed", str(e))
@@ -322,7 +379,7 @@ class FunctionGeneratorTab:
             messagebox.showerror("FGEN Output failed", str(e))
 
     def read_back(self):
-        """Query back current settings from the active channel/device."""
+        """Query back current settings from the active channel/device, incl. pulse params."""
         try:
             inst = self.get_inst()
             if not inst:
@@ -331,13 +388,6 @@ class FunctionGeneratorTab:
             srcp = self._srcp()
             outp = self._outp()
 
-            # Wave
-            try:
-                wave = (inst.query(f"{srcp}FUNC?") or "").strip()
-            except Exception:
-                wave = (inst.query("FUNC?") or "").strip()
-
-            # Freq/Volt/Offset/Phase
             def q(cmds, default=""):
                 for c in cmds:
                     try:
@@ -346,22 +396,37 @@ class FunctionGeneratorTab:
                         continue
                 return default
 
+            # Waveform
+            wave = q([f"{srcp}FUNC?", "FUNC?"])
+
+            # Basics
             freq = q([f"{srcp}FREQ?", "FREQ?"])
             amp  = q([f"{srcp}VOLT?", "VOLT?"])
             unit = q([f"{srcp}VOLT:UNIT?", "VOLT:UNIT?"], default="")
             offs = q([f"{srcp}VOLT:OFFS?", "VOLT:OFFS?"])
             pha  = q([f"{srcp}PHAS?", f"{srcp}FUNC:PHAS?", "PHAS?", "FUNC:PHAS?"], default="")
-
-            duty = ""
-            wu = wave.upper()
-            if wu.startswith("SQU") or wu.startswith("PULS"):
-                duty = q([f"{srcp}FUNC:SQU:DCYC?", f"{srcp}PULS:DCYC?", "FUNC:SQU:DCYC?","PULS:DCYC?"], "")
-
             load = q([f"{outp}LOAD?", "OUTP:LOAD?"], "")
             out_state = q([f"{outp}STAT?", "OUTP:STAT?"], "")
 
+            # Duty or Pulse params
+            duty = ""
+            pwid = ""
+            plead = ""
+            ptrai = ""
+            wu = (wave or "").upper()
+            if wu.startswith("PULS"):
+                pwid  = q([f"{srcp}PULS:WIDT?", f"{srcp}FUNC:PULS:WIDT?", "PULS:WIDT?", "FUNC:PULS:WIDT?"], "")
+                plead = q([f"{srcp}PULS:TRAN:LEAD?", f"{srcp}PULS:TRAN:LEADing?",
+                           "PULS:TRAN:LEAD?", "PULS:TRAN:LEADing?" ], "")
+                ptrai = q([f"{srcp}PULS:TRAN:TRA?", f"{srcp}PULS:TRAN:TRAiling?",
+                           "PULS:TRAN:TRA?", "PULS:TRAN:TRAiling?" ], "")
+                duty  = q([f"{srcp}PULS:DCYC?", f"{srcp}FUNC:PULS:DCYC?", "PULS:DCYC?", "FUNC:PULS:DCYC?"], "")
+            elif wu.startswith("SQU"):
+                duty = q([f"{srcp}FUNC:SQU:DCYC?", "FUNC:SQU:DCYC?", "PULS:DCYC?"], "")
+
             msg = (f"Wave={wave}, F={freq}, A={amp}{(' ' + unit) if unit else ''}, "
-                   f"O={offs}, P={pha}, Duty={duty}, Load={load}, Output={out_state}")
+                   f"O={offs}, P={pha}, Duty={duty}, Load={load}, Output={out_state}, "
+                   f"Width={pwid}, Lead={plead}, Trail={ptrai}")
             self.log(f"[FGEN] Read Back -> {msg}")
             self.status.set("FGEN settings read.")
             messagebox.showinfo("FGEN Settings", msg)

@@ -3,22 +3,22 @@ from tkinter import ttk, messagebox
 from . import common
 
 class PowerSupplyTab:
-    """Power Supply tab UI + rich per-model features.
+    """Power Supply tab UI (per-model, single-channel control, per-channel readback).
 
-    Supported models (detected via common.detect_psu_model):
+    Models (detected via common.detect_psu_model):
       - E3631A (channels: P6V/P25V/N25V)
       - E3633A (channels: OUT)
       - HMP4040 (channels: 1..4)
       - HMP4030 (channels: 1..3)
       - HM8143  (channels: U1/U2)
 
-    Features:
-      - HMP40x0: 멀티채널 체크박스 → 선택 채널에 동시 Set/Output ON/OFF
-      - 출력 상태 조회 및 표시(단일/멀티 요약)
-      - 보호 기능: OVP/OCP 설정/Enable/조회/클리어(가능한 SCPI 조합 시도)
-      - Readback 측정: MEAS:VOLT?/MEAS:CURR? 등 후보 시도
-      - 프리셋(1.8V/3.3V/5V/12V) 및 스텝 증감(ΔV/ΔI)
-      - Local/Remote 전환(가능한 경우)
+    Design:
+      - All controls act on exactly ONE active channel (selected in the Channel combobox).
+      - Protection features removed (no OVP/OCP).
+      - No "All ON / All OFF".
+      - English-only UI text.
+      - Added a "Per-Channel Readback" panel:
+          For every channel, show "Query V" / "Query I" buttons and read-only fields.
     """
 
     def __init__(self, notebook: ttk.Notebook, get_inst, get_idn, log_fn, status_var: tk.StringVar):
@@ -31,37 +31,28 @@ class PowerSupplyTab:
         self.frame = ttk.Frame(self.notebook)
         self.notebook.add(self.frame, text="Power Supply")
 
-        # Common state
+        # State
         self.model_var = tk.StringVar(value="")
         self.channel_var = tk.StringVar(value="")
+
         self.voltage_var = tk.StringVar(value="")
         self.current_var = tk.StringVar(value="")
 
-        # Output state summary text
         self.output_state_var = tk.StringVar(value="(unknown)")
 
-        # Readback (measured) values
         self.meas_v_var = tk.StringVar(value="")
         self.meas_i_var = tk.StringVar(value="")
 
-        # Protections
-        self.ovp_level_var = tk.StringVar(value="")
-        self.ovp_enable_var = tk.BooleanVar(value=False)
-        self.ocp_level_var = tk.StringVar(value="")
-        self.ocp_enable_var = tk.BooleanVar(value=False)
+        # Per-channel readback store: {chan: (v_var, i_var)}
+        self._per_ch_vars = {}
 
-        # Step controls
-        self.step_v_var = tk.StringVar(value="0.1")
-        self.step_i_var = tk.StringVar(value="0.01")
-
-        # Model-specific
-        self._model_panel_container = None
-        self._model_panel = None
-        self._hmp_channel_vars = []  # for HMP4030/4040 multi-select
+        # Panels that are rebuilt on model change
+        self._model_info_panel = None
+        self._per_ch_panel = None
 
         self._build_ui(self.frame)
 
-    # ---------- UI skeleton ----------
+    # ---------- UI ----------
     def _build_ui(self, parent):
         # Header
         header = ttk.LabelFrame(parent, text="Power Supply")
@@ -74,77 +65,58 @@ class PowerSupplyTab:
         self.channel_combo = ttk.Combobox(header, textvariable=self.channel_var, state="readonly", width=12)
         self.channel_combo.grid(row=0, column=3, padx=(0, 12), pady=8, sticky="w")
 
-        # Model-specific panel placeholder
-        self._model_panel_container = ttk.Frame(header)
-        self._model_panel_container.grid(row=1, column=0, columnspan=4, sticky="we", padx=6, pady=(0, 6))
+        # Model info (rebuilt on update_for_active_device)
+        self._model_info_panel = ttk.Frame(header)
+        self._model_info_panel.grid(row=1, column=0, columnspan=4, sticky="we", padx=6, pady=(0, 6))
 
         for c, w in enumerate([0, 1, 0, 1]):
             header.grid_columnconfigure(c, weight=w)
 
-        # Output controls
-        out = ttk.LabelFrame(parent, text="Outputs")
-        out.pack(fill="x", padx=10, pady=(6, 6))
+        # Setpoint controls
+        sp = ttk.LabelFrame(parent, text="Setpoints")
+        sp.pack(fill="x", padx=10, pady=(6, 6))
 
-        ttk.Label(out, text="Voltage (V):").grid(row=0, column=0, padx=6, pady=6, sticky="e")
-        ttk.Entry(out, textvariable=self.voltage_var, width=10).grid(row=0, column=1, padx=(0, 12), pady=6, sticky="w")
-        ttk.Button(out, text="Set V", command=self.set_voltage).grid(row=0, column=2, padx=6, pady=6)
-        ttk.Button(out, text="Query V (Set)", command=self.query_voltage).grid(row=0, column=3, padx=6, pady=6)
+        ttk.Label(sp, text="Voltage (V):").grid(row=0, column=0, padx=6, pady=6, sticky="e")
+        ttk.Entry(sp, textvariable=self.voltage_var, width=10).grid(row=0, column=1, padx=(0, 12), pady=6, sticky="w")
+        ttk.Button(sp, text="Set V", command=self.set_voltage).grid(row=0, column=2, padx=6, pady=6)
+        ttk.Button(sp, text="Query V (Set)", command=self.query_voltage).grid(row=0, column=3, padx=6, pady=6)
 
-        ttk.Label(out, text="Current Limit (A):").grid(row=1, column=0, padx=6, pady=6, sticky="e")
-        ttk.Entry(out, textvariable=self.current_var, width=10).grid(row=1, column=1, padx=(0, 12), pady=6, sticky="w")
-        ttk.Button(out, text="Set I", command=self.set_current).grid(row=1, column=2, padx=6, pady=6)
-        ttk.Button(out, text="Query I (Set)", command=self.query_current).grid(row=1, column=3, padx=6, pady=6)
-
-        ttk.Separator(out, orient="horizontal").grid(row=2, column=0, columnspan=4, sticky="we", padx=6, pady=(6, 6))
-        ttk.Button(out, text="Output ON", command=lambda: self.output(True)).grid(row=3, column=2, padx=6, pady=6)
-        ttk.Button(out, text="Output OFF", command=lambda: self.output(False)).grid(row=3, column=3, padx=6, pady=6)
-
-        # For HMP: output all ON/OFF handy buttons
-        ttk.Button(out, text="[HMP] All ON", command=lambda: self.output_all(True)).grid(row=3, column=0, padx=6, pady=6, sticky="w")
-        ttk.Button(out, text="[HMP] All OFF", command=lambda: self.output_all(False)).grid(row=3, column=1, padx=6, pady=6, sticky="w")
+        ttk.Label(sp, text="Current Limit (A):").grid(row=1, column=0, padx=6, pady=6, sticky="e")
+        ttk.Entry(sp, textvariable=self.current_var, width=10).grid(row=1, column=1, padx=(0, 12), pady=6, sticky="w")
+        ttk.Button(sp, text="Set I", command=self.set_current).grid(row=1, column=2, padx=6, pady=6)
+        ttk.Button(sp, text="Query I (Set)", command=self.query_current).grid(row=1, column=3, padx=6, pady=6)
 
         for c, w in enumerate([0, 1, 0, 1]):
+            sp.grid_columnconfigure(c, weight=w)
+
+        # Output controls
+        out = ttk.LabelFrame(parent, text="Output")
+        out.pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Button(out, text="Output ON", command=lambda: self.output(True)).grid(row=0, column=2, padx=6, pady=6)
+        ttk.Button(out, text="Output OFF", command=lambda: self.output(False)).grid(row=0, column=3, padx=6, pady=6)
+
+        ttk.Label(out, text="State:").grid(row=0, column=0, padx=6, pady=6, sticky="e")
+        ttk.Entry(out, textvariable=self.output_state_var, state="readonly", width=30).grid(
+            row=0, column=1, padx=(0, 12), pady=6, sticky="w"
+        )
+        ttk.Button(out, text="Query State", command=self.query_output_state).grid(row=0, column=4, padx=6, pady=6)
+
+        for c, w in enumerate([0, 1, 0, 0, 0]):
             out.grid_columnconfigure(c, weight=w)
 
-        # Output state
-        statef = ttk.LabelFrame(parent, text="Output State")
-        statef.pack(fill="x", padx=10, pady=(0, 6))
-        ttk.Label(statef, text="State:").grid(row=0, column=0, padx=6, pady=6, sticky="e")
-        ttk.Entry(statef, textvariable=self.output_state_var, state="readonly", width=50).grid(row=0, column=1, padx=(0,12), pady=6, sticky="w")
-        ttk.Button(statef, text="Query State", command=self.query_output_state).grid(row=0, column=2, padx=6, pady=6)
-
-        # Protections (OVP/OCP)
-        prot = ttk.LabelFrame(parent, text="Protections (OVP / OCP)")
-        prot.pack(fill="x", padx=10, pady=(0, 6))
-
-        # OVP
-        ttk.Label(prot, text="OVP Level (V):").grid(row=0, column=0, padx=6, pady=6, sticky="e")
-        ttk.Entry(prot, textvariable=self.ovp_level_var, width=10).grid(row=0, column=1, padx=(0, 12), pady=6, sticky="w")
-        ttk.Checkbutton(prot, text="Enable OVP", variable=self.ovp_enable_var, command=self.toggle_ovp).grid(row=0, column=2, padx=6, pady=6, sticky="w")
-        ttk.Button(prot, text="Set OVP", command=self.set_ovp).grid(row=0, column=3, padx=6, pady=6)
-        ttk.Button(prot, text="Query OVP", command=self.query_ovp).grid(row=0, column=4, padx=6, pady=6)
-        ttk.Button(prot, text="Clear OVP", command=self.clear_ovp).grid(row=0, column=5, padx=6, pady=6)
-
-        # OCP
-        ttk.Label(prot, text="OCP Level (A):").grid(row=1, column=0, padx=6, pady=6, sticky="e")
-        ttk.Entry(prot, textvariable=self.ocp_level_var, width=10).grid(row=1, column=1, padx=(0, 12), pady=6, sticky="w")
-        ttk.Checkbutton(prot, text="Enable OCP", variable=self.ocp_enable_var, command=self.toggle_ocp).grid(row=1, column=2, padx=6, pady=6, sticky="w")
-        ttk.Button(prot, text="Set OCP", command=self.set_ocp).grid(row=1, column=3, padx=6, pady=6)
-        ttk.Button(prot, text="Query OCP", command=self.query_ocp).grid(row=1, column=4, padx=6, pady=6)
-        ttk.Button(prot, text="Clear OCP", command=self.clear_ocp).grid(row=1, column=5, padx=6, pady=6)
-
-        for c, w in enumerate([0, 1, 0, 0, 0, 0]):
-            prot.grid_columnconfigure(c, weight=w)
-
-        # Readback measure
-        meas = ttk.LabelFrame(parent, text="Readback (MEAS)")
+        # Readback for selected channel
+        meas = ttk.LabelFrame(parent, text="Readback (Selected Channel)")
         meas.pack(fill="x", padx=10, pady=(0, 6))
         ttk.Label(meas, text="V_meas (V):").grid(row=0, column=0, padx=6, pady=6, sticky="e")
-        ttk.Entry(meas, textvariable=self.meas_v_var, width=12, state="readonly").grid(row=0, column=1, padx=(0,12), pady=6, sticky="w")
+        ttk.Entry(meas, textvariable=self.meas_v_var, width=12, state="readonly").grid(
+            row=0, column=1, padx=(0, 12), pady=6, sticky="w"
+        )
         ttk.Button(meas, text="Query V_meas", command=self.measure_voltage).grid(row=0, column=2, padx=6, pady=6)
 
         ttk.Label(meas, text="I_meas (A):").grid(row=1, column=0, padx=6, pady=6, sticky="e")
-        ttk.Entry(meas, textvariable=self.meas_i_var, width=12, state="readonly").grid(row=1, column=1, padx=(0,12), pady=6, sticky="w")
+        ttk.Entry(meas, textvariable=self.meas_i_var, width=12, state="readonly").grid(
+            row=1, column=1, padx=(0, 12), pady=6, sticky="w"
+        )
         ttk.Button(meas, text="Query I_meas", command=self.measure_current).grid(row=1, column=2, padx=6, pady=6)
 
         ttk.Button(meas, text="Query Both", command=self.measure_both).grid(row=0, column=3, rowspan=2, padx=6, pady=6, sticky="ns")
@@ -152,36 +124,9 @@ class PowerSupplyTab:
         for c, w in enumerate([0, 1, 0, 0]):
             meas.grid_columnconfigure(c, weight=w)
 
-        # Presets & Step
-        pres = ttk.LabelFrame(parent, text="Presets & Step")
-        pres.pack(fill="x", padx=10, pady=(0, 10))
-
-        # Presets
-        ttk.Label(pres, text="Quick Presets (V):").grid(row=0, column=0, padx=6, pady=6, sticky="e")
-        ttk.Button(pres, text="1.8V", command=lambda: self._apply_preset_v(1.8)).grid(row=0, column=1, padx=4, pady=6)
-        ttk.Button(pres, text="3.3V", command=lambda: self._apply_preset_v(3.3)).grid(row=0, column=2, padx=4, pady=6)
-        ttk.Button(pres, text="5V",   command=lambda: self._apply_preset_v(5.0)).grid(row=0, column=3, padx=4, pady=6)
-        ttk.Button(pres, text="12V",  command=lambda: self._apply_preset_v(12.0)).grid(row=0, column=4, padx=4, pady=6)
-
-        # Step controls
-        ttk.Label(pres, text="ΔV:").grid(row=1, column=0, padx=6, pady=6, sticky="e")
-        ttk.Entry(pres, textvariable=self.step_v_var, width=8).grid(row=1, column=1, padx=(0, 6), pady=6, sticky="w")
-        ttk.Button(pres, text="+V", command=lambda: self._nudge_value(self.voltage_var, self.step_v_var, True, self.set_voltage)).grid(row=1, column=2, padx=4, pady=6)
-        ttk.Button(pres, text="-V", command=lambda: self._nudge_value(self.voltage_var, self.step_v_var, False, self.set_voltage)).grid(row=1, column=3, padx=4, pady=6)
-
-        ttk.Label(pres, text="ΔI:").grid(row=1, column=4, padx=6, pady=6, sticky="e")
-        ttk.Entry(pres, textvariable=self.step_i_var, width=8).grid(row=1, column=5, padx=(0, 6), pady=6, sticky="w")
-        ttk.Button(pres, text="+I", command=lambda: self._nudge_value(self.current_var, self.step_i_var, True, self.set_current)).grid(row=1, column=6, padx=4, pady=6)
-        ttk.Button(pres, text="-I", command=lambda: self._nudge_value(self.current_var, self.step_i_var, False, self.set_current)).grid(row=1, column=7, padx=4, pady=6)
-
-        for c, w in enumerate([0, 0, 0, 0, 0, 0, 0, 1]):
-            pres.grid_columnconfigure(c, weight=w)
-
-        # System
-        sysf = ttk.LabelFrame(parent, text="System")
-        sysf.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Button(sysf, text="Remote", command=self.to_remote).grid(row=0, column=0, padx=6, pady=6)
-        ttk.Button(sysf, text="Local",  command=self.to_local).grid(row=0, column=1, padx=6, pady=6)
+        # Per-Channel Readback (rebuilt per model)
+        self._per_ch_panel = ttk.LabelFrame(parent, text="Per-Channel Readback")
+        self._per_ch_panel.pack(fill="x", padx=10, pady=(0, 10))
 
     # ---------- lifecycle ----------
     def set_enabled(self, enabled: bool):
@@ -197,7 +142,8 @@ class PowerSupplyTab:
             self.model_var.set("(No PSU)")
             self.channel_combo["values"] = []
             self.set_enabled(False)
-            self._destroy_model_panel()
+            self._rebuild_model_info("(Unknown)", [])
+            self._rebuild_per_channel([])
             return
 
         model = common.detect_psu_model(idn)
@@ -207,176 +153,152 @@ class PowerSupplyTab:
         if not chs:
             self.channel_combo["values"] = []
             self.set_enabled(False)
-            self._destroy_model_panel()
+            self._rebuild_model_info("(Unknown)", [])
+            self._rebuild_per_channel([])
             return
 
         self.set_enabled(True)
         self.channel_combo["values"] = chs
-        if len(chs) == 1:
-            self.channel_combo.configure(state="disabled")
+        if not self.channel_var.get() or self.channel_var.get() not in chs:
             self.channel_var.set(chs[0])
-        else:
-            self.channel_combo.configure(state="readonly")
-            if not self.channel_var.get() or self.channel_var.get() not in chs:
-                self.channel_var.set(chs[0])
 
-        self._build_model_panel(model)
+        self._rebuild_model_info(model, chs)
+        self._rebuild_per_channel(chs)
+
+        # reset readbacks
         self.output_state_var.set("(unknown)")
         self.meas_v_var.set("")
         self.meas_i_var.set("")
 
-    # ---------- model panel builders ----------
-    def _destroy_model_panel(self):
-        self._hmp_channel_vars = []
-        if self._model_panel is not None:
-            try:
-                self._model_panel.destroy()
-            except Exception:
-                pass
-            self._model_panel = None
+    # ---------- rebuilders ----------
+    def _clear_children(self, widget):
+        for w in list(widget.winfo_children()):
+            try: w.destroy()
+            except Exception: pass
 
-    def _build_model_panel(self, model: str):
-        self._destroy_model_panel()
-        pnl = ttk.Frame(self._model_panel_container)
-        self._model_panel = pnl
+    def _rebuild_model_info(self, model: str, chs):
+        if self._model_info_panel is None:
+            return
+        self._clear_children(self._model_info_panel)
 
+        text = ""
         if model in ("HMP4040", "HMP4030"):
-            ttk.Label(pnl, text="HMP multi-channel: 선택 채널에 동시 적용(Set/Output)").grid(
-                row=0, column=0, columnspan=8, sticky="w", padx=4, pady=(2, 4)
-            )
-            chs = common.psu_channel_values(model)
-            self._hmp_channel_vars = []
-            for i, ch in enumerate(chs):
-                var = tk.BooleanVar(value=False)
-                self._hmp_channel_vars.append((ch, var))
-                cb = ttk.Checkbutton(pnl, text=f"CH{ch}", variable=var)
-                cb.grid(row=1, column=i, padx=4, pady=2, sticky="w")
-            tip = ("Tip: 체크박스를 선택하지 않으면 상단 'Channel'의 단일 채널로 동작합니다.")
-            ttk.Label(pnl, text=tip, foreground="#666").grid(row=2, column=0, columnspan=8, sticky="w", padx=4, pady=(2, 2))
-            for c in range(8):
-                pnl.grid_columnconfigure(c, weight=0)
-
+            text = f"R&S {model} — select a single channel above to control."
         elif model == "E3631A":
-            ttk.Label(pnl, text="Keysight E3631A channels: P6V / P25V / N25V").grid(
-                row=0, column=0, sticky="w", padx=4, pady=(2, 2)
-            )
+            text = "Keysight E3631A — channels: P6V / P25V / N25V."
         elif model == "E3633A":
-            ttk.Label(pnl, text="Keysight E3633A single output: OUT").grid(
-                row=0, column=0, sticky="w", padx=4, pady=(2, 2)
-            )
+            text = "Keysight E3633A — single output: OUT."
         elif model == "HM8143":
-            ttk.Label(pnl, text="HAMEG HM8143 channels: U1 / U2 (SU/SI, RU/RI 사용)").grid(
-                row=0, column=0, sticky="w", padx=4, pady=(2, 2)
-            )
+            text = "HAMEG HM8143 — channels: U1 / U2 (SU/SI, RU/RI used)."
         else:
-            ttk.Label(pnl, text="Unknown PSU model detected. Using generic controls.").grid(
-                row=0, column=0, sticky="w", padx=4, pady=(2, 2)
-            )
+            text = "Unknown PSU model. Generic SCPI will be used."
 
-        pnl.pack(fill="x", expand=False)
+        ttk.Label(self._model_info_panel, text=text).pack(anchor="w")
+
+    def _rebuild_per_channel(self, chs):
+        self._clear_children(self._per_ch_panel)
+        self._per_ch_vars = {}
+
+        if not chs:
+            ttk.Label(self._per_ch_panel, text="No channels.").pack(anchor="w", padx=6, pady=6)
+            return
+
+        # Table header
+        hdr = ttk.Frame(self._per_ch_panel)
+        hdr.pack(fill="x", padx=6, pady=(6, 2))
+        ttk.Label(hdr, text="Channel", width=12).grid(row=0, column=0, sticky="w")
+        ttk.Label(hdr, text="V_meas (V)", width=16).grid(row=0, column=1, sticky="w")
+        ttk.Label(hdr, text="I_meas (A)", width=16).grid(row=0, column=2, sticky="w")
+        ttk.Label(hdr, text="Actions").grid(row=0, column=3, sticky="w")
+
+        # Rows
+        for r, ch in enumerate(chs, start=1):
+            row = ttk.Frame(self._per_ch_panel)
+            row.pack(fill="x", padx=6, pady=2)
+
+            ttk.Label(row, text=str(ch), width=12).grid(row=0, column=0, sticky="w")
+            v_var = tk.StringVar(value="")
+            i_var = tk.StringVar(value="")
+            self._per_ch_vars[ch] = (v_var, i_var)
+
+            ttk.Entry(row, textvariable=v_var, width=16, state="readonly").grid(row=0, column=1, sticky="w", padx=(0, 8))
+            ttk.Entry(row, textvariable=i_var, width=16, state="readonly").grid(row=0, column=2, sticky="w", padx=(0, 8))
+
+            ttk.Button(row, text="Query V", command=lambda c=ch: self._per_ch_query_v(c)).grid(row=0, column=3, padx=2)
+            ttk.Button(row, text="Query I", command=lambda c=ch: self._per_ch_query_i(c)).grid(row=0, column=4, padx=2)
+            ttk.Button(row, text="Query Both", command=lambda c=ch: self._per_ch_query_both(c)).grid(row=0, column=5, padx=2)
 
     # ---------- helpers ----------
-    def _selected_hmp_channels(self):
-        if not self._hmp_channel_vars:
-            return []
-        return [ch for ch, var in self._hmp_channel_vars if var.get()]
-
-    def _apply_to_channels(self, model: str, channels, setter_fn):
+    def _require_inst(self):
         inst = self.get_inst()
-        for ch in channels:
-            if model in ("HMP4040", "HMP4030"):
-                common.psu_select_channel(inst, model, ch)
-                setter_fn(inst, model, ch)
-            elif model == "HM8143":
-                setter_fn(inst, model, ch)
-            else:
-                common.psu_select_channel(inst, model, ch)
-                setter_fn(inst, model, ch)
+        if not inst:
+            messagebox.showinfo("Not connected", "Activate a connected device first.")
+            return None
+        return inst
+
+    def _select_channel_if_needed(self, model: str, ch: str):
+        """Select channel for models that need explicit selection (not HM8143)."""
+        if model != "HM8143":
+            common.psu_select_channel(self.get_inst(), model, ch)
 
     def _parse_onoff(self, s: str) -> str:
         s = (s or "").strip().upper()
-        if s in ("1", "ON", "ON,ON", "ON,1"):  # vendor differences
+        if s in ("1", "ON", "ON,ON", "ON,1"):
             return "ON"
         if s in ("0", "OFF", "OFF,OFF", "OFF,0"):
             return "OFF"
         return s or "(unknown)"
 
-    def _agg_states_text(self, mapping):
-        # mapping: {channel: "ON"/"OFF"/"..."}
-        items = [f"{k}:{v}" for k, v in mapping.items()]
-        return ", ".join(items) if items else "(none)"
-
-    def _nudge_value(self, target_var: tk.StringVar, step_var: tk.StringVar, up: bool, apply_fn):
-        try:
-            cur = float((target_var.get() or "0").strip())
-            step = float((step_var.get() or "0").strip())
-            newv = cur + (step if up else -step)
-            target_var.set(f"{newv}")
-            apply_fn()
-        except Exception as e:
-            messagebox.showerror("Step apply failed", str(e))
-
-    def _apply_preset_v(self, v: float):
-        self.voltage_var.set(f"{v}")
-        self.set_voltage()
-
-    # ---------- operations: set/query setpoints ----------
+    # ---------- set/query setpoints (selected channel) ----------
     def set_voltage(self):
         try:
-            inst = self.get_inst();  idn = self.get_idn()
+            inst = self._require_inst(); 
             if not inst: return
+            idn = self.get_idn()
             model = common.detect_psu_model(idn)
+            ch = common.trim(self.channel_var.get())
             v = float(self.voltage_var.get())
 
-            if model in ("HMP4040", "HMP4030"):
-                channels = self._selected_hmp_channels() or [common.trim(self.channel_var.get())]
+            if model == "HM8143":
+                idx = common.hm8143_ch_index(ch)
+                inst.write(f"SU{idx}:{v}")
             else:
-                channels = [common.trim(self.channel_var.get())]
-
-            def _setter(_inst, _model, ch):
-                if _model == "HM8143":
-                    idx = common.hm8143_ch_index(ch)
-                    _inst.write(f"SU{idx}:{v}")
-                elif _model in ("HMP4040", "HMP4030"):
-                    _inst.write(f"SOUR:VOLT {v}")
-                elif _model in ("E3631A", "E3633A"):
-                    _inst.write(f"VOLT {v}")
-
-            self._apply_to_channels(model, channels, _setter)
-            self.log(f"[PSU] Set V -> {v} on {','.join(channels)} ({model})")
+                self._select_channel_if_needed(model, ch)
+                if model in ("HMP4040", "HMP4030"):
+                    inst.write(f"SOUR:VOLT {v}")
+                elif model in ("E3631A", "E3633A"):
+                    inst.write(f"VOLT {v}")
+            self.log(f"[PSU] Set V -> {v} on {ch} ({model})")
         except Exception as e:
             messagebox.showerror("Set Voltage failed", str(e))
 
     def set_current(self):
         try:
-            inst = self.get_inst();  idn = self.get_idn()
+            inst = self._require_inst(); 
             if not inst: return
+            idn = self.get_idn()
             model = common.detect_psu_model(idn)
+            ch = common.trim(self.channel_var.get())
             i = float(self.current_var.get())
 
-            if model in ("HMP4040", "HMP4030"):
-                channels = self._selected_hmp_channels() or [common.trim(self.channel_var.get())]
+            if model == "HM8143":
+                idx = common.hm8143_ch_index(ch)
+                inst.write(f"SI{idx}:{i}")
             else:
-                channels = [common.trim(self.channel_var.get())]
-
-            def _setter(_inst, _model, ch):
-                if _model == "HM8143":
-                    idx = common.hm8143_ch_index(ch)
-                    _inst.write(f"SI{idx}:{i}")
-                elif _model in ("HMP4040", "HMP4030"):
-                    _inst.write(f"SOUR:CURR {i}")
-                elif _model in ("E3631A", "E3633A"):
-                    _inst.write(f"CURR {i}")
-
-            self._apply_to_channels(model, channels, _setter)
-            self.log(f"[PSU] Set I -> {i} on {','.join(channels)} ({model})")
+                self._select_channel_if_needed(model, ch)
+                if model in ("HMP4040", "HMP4030"):
+                    inst.write(f"SOUR:CURR {i}")
+                elif model in ("E3631A", "E3633A"):
+                    inst.write(f"CURR {i}")
+            self.log(f"[PSU] Set I -> {i} on {ch} ({model})")
         except Exception as e:
             messagebox.showerror("Set Current failed", str(e))
 
     def query_voltage(self):
         try:
-            inst = self.get_inst();  idn = self.get_idn()
+            inst = self._require_inst(); 
             if not inst: return
+            idn = self.get_idn()
             model = common.detect_psu_model(idn)
             ch = common.trim(self.channel_var.get())
 
@@ -384,7 +306,7 @@ class PowerSupplyTab:
                 idx = common.hm8143_ch_index(ch)
                 resp = inst.query(f"RU{idx}").strip()
             else:
-                common.psu_select_channel(inst, model, ch)
+                self._select_channel_if_needed(model, ch)
                 if model in ("HMP4040", "HMP4030"):
                     resp = inst.query("SOUR:VOLT?").strip()
                 elif model in ("E3631A", "E3633A"):
@@ -397,8 +319,9 @@ class PowerSupplyTab:
 
     def query_current(self):
         try:
-            inst = self.get_inst();  idn = self.get_idn()
+            inst = self._require_inst(); 
             if not inst: return
+            idn = self.get_idn()
             model = common.detect_psu_model(idn)
             ch = common.trim(self.channel_var.get())
 
@@ -406,7 +329,7 @@ class PowerSupplyTab:
                 idx = common.hm8143_ch_index(ch)
                 resp = inst.query(f"RI{idx}").strip()
             else:
-                common.psu_select_channel(inst, model, ch)
+                self._select_channel_if_needed(model, ch)
                 if model in ("HMP4040", "HMP4030"):
                     resp = inst.query("SOUR:CURR?").strip()
                 elif model in ("E3631A", "E3633A"):
@@ -417,328 +340,119 @@ class PowerSupplyTab:
         except Exception as e:
             messagebox.showerror("Query Current failed", str(e))
 
-    # ---------- operations: output ----------
+    # ---------- output (selected channel) ----------
     def output(self, on: bool):
         try:
-            inst = self.get_inst();  idn = self.get_idn()
+            inst = self._require_inst(); 
             if not inst: return
+            idn = self.get_idn()
             model = common.detect_psu_model(idn)
+            ch = common.trim(self.channel_var.get())
             val = "ON" if on else "OFF"
 
-            if model in ("HMP4040", "HMP4030"):
-                channels = self._selected_hmp_channels() or [common.trim(self.channel_var.get())]
-
-                def _setter(_inst, _model, ch):
-                    common.psu_select_channel(_inst, _model, ch)
-                    sequences = [[f"OUTP {val}"], [f"OUTPut:STATe {val}"]]
-                    common.try_sequences(_inst, sequences)
-
-                self._apply_to_channels(model, channels, _setter)
-                self.log(f"[PSU] Output -> {val} on {','.join(channels)} ({model})")
-            elif model == "HM8143":
+            if model == "HM8143":
+                # No explicit per-channel OUTP in this generic template; try global
                 sequences = [[f"OUTP {val}"], [f"OUTPut:STATe {val}"]]
                 common.try_sequences(inst, sequences)
-                self.log(f"[PSU] Output -> {val} ({model})")
             else:
+                self._select_channel_if_needed(model, ch)
                 sequences = [[f"OUTP {val}"], [f"OUTPut:STATe {val}"]]
                 common.try_sequences(inst, sequences)
-                self.log(f"[PSU] Output -> {val} ({model})")
+
+            self.log(f"[PSU] Output -> {val} on {ch} ({model})")
         except Exception as e:
             messagebox.showerror("PSU Output failed", str(e))
 
-    def output_all(self, on: bool):
-        """HMP 전용 편의 기능: 모든 채널 일괄 ON/OFF"""
-        try:
-            inst = self.get_inst(); idn = self.get_idn()
-            if not inst: return
-            model = common.detect_psu_model(idn)
-            if model not in ("HMP4040", "HMP4030"):
-                messagebox.showinfo("Not HMP", "이 기능은 HMP4030/4040에서만 지원됩니다.")
-                return
-            val = "ON" if on else "OFF"
-            for ch in common.psu_channel_values(model):
-                common.psu_select_channel(inst, model, ch)
-                sequences = [[f"OUTP {val}"], [f"OUTPut:STATe {val}"]]
-                common.try_sequences(inst, sequences)
-            self.log(f"[PSU] Output ALL -> {val} ({model})")
-        except Exception as e:
-            messagebox.showerror("PSU Output(All) failed", str(e))
-
     def query_output_state(self):
-        """단일 채널 또는 HMP 멀티 선택 채널의 출력 상태를 조회하여 요약 표시."""
         try:
-            inst = self.get_inst(); idn = self.get_idn()
+            inst = self._require_inst(); 
             if not inst: return
+            idn = self.get_idn()
             model = common.detect_psu_model(idn)
+            ch = common.trim(self.channel_var.get())
 
-            result = {}
-            if model in ("HMP4040", "HMP4030"):
-                channels = self._selected_hmp_channels() or [common.trim(self.channel_var.get())]
-                for ch in channels:
-                    common.psu_select_channel(inst, model, ch)
-                    candidates = ["OUTP?", "OUTPut:STATe?"]
-                    resp = None
-                    for cmd in candidates:
-                        try:
-                            resp = (inst.query(cmd) or "").strip()
-                            if resp:
-                                break
-                        except Exception:
-                            continue
-                    result[ch] = self._parse_onoff(resp)
-            elif model == "HM8143":
-                # 베ンダ 전용 명령이 다를 수 있어 Generic 시도
-                candidates = ["OUTP?", "OUTPut:STATe?"]
-                resp = None
-                for cmd in candidates:
-                    try:
-                        r = (inst.query(cmd) or "").strip()
-                        if r:
-                            resp = r
-                            break
-                    except Exception:
-                        continue
-                result["ALL"] = self._parse_onoff(resp)
-            else:
-                candidates = ["OUTP?", "OUTPut:STATe?"]
-                resp = None
-                for cmd in candidates:
-                    try:
-                        r = (inst.query(cmd) or "").strip()
-                        if r:
-                            resp = r
-                            break
-                    except Exception:
-                        continue
-                result["OUT"] = self._parse_onoff(resp)
+            if model != "HM8143":
+                self._select_channel_if_needed(model, ch)
 
-            self.output_state_var.set(self._agg_states_text(result))
-            self.log(f"[PSU] Output State -> {self.output_state_var.get()}")
+            candidates = ["OUTP?", "OUTPut:STATe?"]
+            resp = None
+            for cmd in candidates:
+                try:
+                    r = (inst.query(cmd) or "").strip()
+                    if r:
+                        resp = r
+                        break
+                except Exception:
+                    continue
+
+            self.output_state_var.set(self._parse_onoff(resp))
+            self.log(f"[PSU] Output State on {ch} ({model}) -> {resp}")
         except Exception as e:
             messagebox.showerror("Query Output State failed", str(e))
 
-    # ---------- operations: protections ----------
-    def set_ovp(self):
-        try:
-            inst = self.get_inst()
-            if not inst: return
-            v = float(self.ovp_level_var.get())
-            sequences = [
-                [f"VOLT:PROT {v}"],
-                [f"VOLTage:PROTection {v}"],
-                [f"VOLTage:PROTection:LEVel {v}"],
-            ]
-            common.try_sequences(inst, sequences)
-            common.drain_error_queue(inst, self.log, "[PSU/OVP]")
-            self.log(f"[PSU] OVP level set -> {v}")
-        except Exception as e:
-            messagebox.showerror("Set OVP failed", str(e))
-
-    def query_ovp(self):
-        try:
-            inst = self.get_inst()
-            if not inst: return
-            # Query level (우선)
-            candidates = ["VOLT:PROT?", "VOLTage:PROTection?", "VOLTage:PROTection:LEVel?"]
-            resp = None
-            for c in candidates:
-                try:
-                    r = (inst.query(c) or "").strip()
-                    if r:
-                        resp = r
-                        break
-                except Exception:
-                    continue
-            if resp:
-                self.ovp_level_var.set(common.extract_number(resp))
-                self.log(f"[PSU] OVP level? -> {resp}")
-
-            # Query enable 상태
-            candidates_en = ["VOLT:PROT:STAT?", "VOLTage:PROTection:STATe?"]
-            resp_en = None
-            for c in candidates_en:
-                try:
-                    r = (inst.query(c) or "").strip()
-                    if r:
-                        resp_en = r
-                        break
-                except Exception:
-                    continue
-            if resp_en:
-                self.ovp_enable_var.set(self._parse_onoff(resp_en) == "ON")
-                self.log(f"[PSU] OVP enable? -> {resp_en}")
-
-            common.drain_error_queue(inst, self.log, "[PSU/OVP]")
-        except Exception as e:
-            messagebox.showerror("Query OVP failed", str(e))
-
-    def toggle_ovp(self):
-        try:
-            inst = self.get_inst()
-            if not inst: return
-            val = "ON" if self.ovp_enable_var.get() else "OFF"
-            sequences = [
-                [f"VOLT:PROT:STAT {val}"],
-                [f"VOLTage:PROTection:STATe {val}"],
-            ]
-            common.try_sequences(inst, sequences)
-            common.drain_error_queue(inst, self.log, "[PSU/OVP]")
-            self.log(f"[PSU] OVP enable -> {val}")
-        except Exception as e:
-            messagebox.showerror("Toggle OVP failed", str(e))
-
-    def clear_ovp(self):
-        try:
-            inst = self.get_inst()
-            if not inst: return
-            sequences = [
-                ["VOLT:PROT:CLE"],
-                ["VOLTage:PROTection:CLEar"],
-                ["OUTP:PROT:CLE"],     # 일부 장비 호환
-                ["OUTPut:PROTection:CLEar"],
-            ]
-            common.try_sequences(inst, sequences)
-            common.drain_error_queue(inst, self.log, "[PSU/OVP]")
-            self.log("[PSU] OVP cleared")
-        except Exception as e:
-            messagebox.showerror("Clear OVP failed", str(e))
-
-    def set_ocp(self):
-        try:
-            inst = self.get_inst()
-            if not inst: return
-            i = float(self.ocp_level_var.get())
-            sequences = [
-                [f"CURR:PROT {i}"],
-                [f"CURRent:PROTection {i}"],
-                [f"CURRent:PROTection:LEVel {i}"],
-            ]
-            common.try_sequences(inst, sequences)
-            common.drain_error_queue(inst, self.log, "[PSU/OCP]")
-            self.log(f"[PSU] OCP level set -> {i}")
-        except Exception as e:
-            messagebox.showerror("Set OCP failed", str(e))
-
-    def query_ocp(self):
-        try:
-            inst = self.get_inst()
-            if not inst: return
-            # Level
-            candidates = ["CURR:PROT?", "CURRent:PROTection?", "CURRent:PROTection:LEVel?"]
-            resp = None
-            for c in candidates:
-                try:
-                    r = (inst.query(c) or "").strip()
-                    if r:
-                        resp = r
-                        break
-                except Exception:
-                    continue
-            if resp:
-                self.ocp_level_var.set(common.extract_number(resp))
-                self.log(f"[PSU] OCP level? -> {resp}")
-
-            # Enable state
-            candidates_en = ["CURR:PROT:STAT?", "CURRent:PROTection:STATe?"]
-            resp_en = None
-            for c in candidates_en:
-                try:
-                    r = (inst.query(c) or "").strip()
-                    if r:
-                        resp_en = r
-                        break
-                except Exception:
-                    continue
-            if resp_en:
-                self.ocp_enable_var.set(self._parse_onoff(resp_en) == "ON")
-                self.log(f"[PSU] OCP enable? -> {resp_en}")
-
-            common.drain_error_queue(inst, self.log, "[PSU/OCP]")
-        except Exception as e:
-            messagebox.showerror("Query OCP failed", str(e))
-
-    def toggle_ocp(self):
-        try:
-            inst = self.get_inst()
-            if not inst: return
-            val = "ON" if self.ocp_enable_var.get() else "OFF"
-            sequences = [
-                [f"CURR:PROT:STAT {val}"],
-                [f"CURRent:PROTection:STATe {val}"],
-            ]
-            common.try_sequences(inst, sequences)
-            common.drain_error_queue(inst, self.log, "[PSU/OCP]")
-            self.log(f"[PSU] OCP enable -> {val}")
-        except Exception as e:
-            messagebox.showerror("Toggle OCP failed", str(e))
-
-    def clear_ocp(self):
-        try:
-            inst = self.get_inst()
-            if not inst: return
-            sequences = [
-                ["CURR:PROT:CLE"],
-                ["CURRent:PROTection:CLEar"],
-                ["OUTP:PROT:CLE"],     # 일부 장비 호환
-                ["OUTPut:PROTection:CLEar"],
-            ]
-            common.try_sequences(inst, sequences)
-            common.drain_error_queue(inst, self.log, "[PSU/OCP]")
-            self.log("[PSU] OCP cleared")
-        except Exception as e:
-            messagebox.showerror("Clear OCP failed", str(e))
-
-    # ---------- operations: readback ----------
+    # ---------- readback (selected channel) ----------
     def measure_voltage(self):
         try:
-            inst = self.get_inst(); idn = self.get_idn()
+            inst = self._require_inst(); 
             if not inst: return
+            idn = self.get_idn()
             model = common.detect_psu_model(idn)
+            ch = common.trim(self.channel_var.get())
 
-            # 채널 지정 필요 시 선택
-            if model not in ("HM8143",):
-                common.psu_select_channel(inst, model, common.trim(self.channel_var.get()))
+            if model != "HM8143":
+                self._select_channel_if_needed(model, ch)
 
-            candidates = ["MEAS:VOLT?", "MEAS:VOLT:DC?"]
-            resp = None
-            for c in candidates:
-                try:
-                    r = (inst.query(c) or "").strip()
-                    if r:
-                        resp = r
-                        break
-                except Exception:
-                    continue
+            if model == "HM8143":
+                idx = common.hm8143_ch_index(ch)
+                resp = inst.query(f"RU{idx}").strip()
+            else:
+                # Try typical MEAS commands
+                candidates = ["MEAS:VOLT?", "MEAS:VOLT:DC?"]
+                resp = None
+                for c in candidates:
+                    try:
+                        r = (inst.query(c) or "").strip()
+                        if r:
+                            resp = r
+                            break
+                    except Exception:
+                        continue
+
             if resp:
                 self.meas_v_var.set(common.extract_number(resp))
-                self.log(f"[PSU] MEAS:VOLT? -> {resp}")
-            common.drain_error_queue(inst, self.log, "[PSU/MEAS]")
+                self.log(f"[PSU] V_meas on {ch} ({model}) -> {resp}")
         except Exception as e:
             messagebox.showerror("Measure Voltage failed", str(e))
 
     def measure_current(self):
         try:
-            inst = self.get_inst(); idn = self.get_idn()
+            inst = self._require_inst(); 
             if not inst: return
+            idn = self.get_idn()
             model = common.detect_psu_model(idn)
+            ch = common.trim(self.channel_var.get())
 
-            if model not in ("HM8143",):
-                common.psu_select_channel(inst, model, common.trim(self.channel_var.get()))
+            if model != "HM8143":
+                self._select_channel_if_needed(model, ch)
 
-            candidates = ["MEAS:CURR?", "MEAS:CURR:DC?"]
-            resp = None
-            for c in candidates:
-                try:
-                    r = (inst.query(c) or "").strip()
-                    if r:
-                        resp = r
-                        break
-                except Exception:
-                    continue
+            if model == "HM8143":
+                idx = common.hm8143_ch_index(ch)
+                resp = inst.query(f"RI{idx}").strip()
+            else:
+                candidates = ["MEAS:CURR?", "MEAS:CURR:DC?"]
+                resp = None
+                for c in candidates:
+                    try:
+                        r = (inst.query(c) or "").strip()
+                        if r:
+                            resp = r
+                            break
+                    except Exception:
+                        continue
+
             if resp:
                 self.meas_i_var.set(common.extract_number(resp))
-                self.log(f"[PSU] MEAS:CURR? -> {resp}")
-            common.drain_error_queue(inst, self.log, "[PSU/MEAS]")
+                self.log(f"[PSU] I_meas on {ch} ({model}) -> {resp}")
         except Exception as e:
             messagebox.showerror("Measure Current failed", str(e))
 
@@ -746,25 +460,67 @@ class PowerSupplyTab:
         self.measure_voltage()
         self.measure_current()
 
-    # ---------- operations: system ----------
-    def to_remote(self):
+    # ---------- per-channel readback (buttons for each channel) ----------
+    def _per_ch_query_v(self, ch: str):
         try:
-            inst = self.get_inst()
+            inst = self._require_inst(); 
             if not inst: return
-            sequences = [["SYST:REM"], ["SYSTem:REMote"]]
-            common.try_sequences(inst, sequences)
-            common.drain_error_queue(inst, self.log, "[PSU/SYS]")
-            self.log("[PSU] System -> REMOTE")
-        except Exception as e:
-            messagebox.showerror("Set Remote failed", str(e))
+            idn = self.get_idn()
+            model = common.detect_psu_model(idn)
 
-    def to_local(self):
-        try:
-            inst = self.get_inst()
-            if not inst: return
-            sequences = [["SYST:LOC"], ["SYSTem:LOCal"]]
-            common.try_sequences(inst, sequences)
-            common.drain_error_queue(inst, self.log, "[PSU/SYS]")
-            self.log("[PSU] System -> LOCAL")
+            if model == "HM8143":
+                idx = common.hm8143_ch_index(ch)
+                resp = inst.query(f"RU{idx}").strip()
+            else:
+                common.psu_select_channel(inst, model, ch)
+                candidates = ["MEAS:VOLT?", "MEAS:VOLT:DC?"]
+                resp = None
+                for c in candidates:
+                    try:
+                        r = (inst.query(c) or "").strip()
+                        if r:
+                            resp = r
+                            break
+                    except Exception:
+                        continue
+
+            if ch in self._per_ch_vars and resp:
+                v_var, _ = self._per_ch_vars[ch]
+                v_var.set(common.extract_number(resp))
+            self.log(f"[PSU] [Per-Channel] V_meas on {ch} -> {resp}")
         except Exception as e:
-            messagebox.showerror("Set Local failed", str(e))
+            messagebox.showerror("Per-Channel V query failed", str(e))
+
+    def _per_ch_query_i(self, ch: str):
+        try:
+            inst = self._require_inst(); 
+            if not inst: return
+            idn = self.get_idn()
+            model = common.detect_psu_model(idn)
+
+            if model == "HM8143":
+                idx = common.hm8143_ch_index(ch)
+                resp = inst.query(f"RI{idx}").strip()
+            else:
+                common.psu_select_channel(inst, model, ch)
+                candidates = ["MEAS:CURR?", "MEAS:CURR:DC?"]
+                resp = None
+                for c in candidates:
+                    try:
+                        r = (inst.query(c) or "").strip()
+                        if r:
+                            resp = r
+                            break
+                    except Exception:
+                        continue
+
+            if ch in self._per_ch_vars and resp:
+                _, i_var = self._per_ch_vars[ch]
+                i_var.set(common.extract_number(resp))
+            self.log(f"[PSU] [Per-Channel] I_meas on {ch} -> {resp}")
+        except Exception as e:
+            messagebox.showerror("Per-Channel I query failed", str(e))
+
+    def _per_ch_query_both(self, ch: str):
+        self._per_ch_query_v(ch)
+        self._per_ch_query_i(ch)

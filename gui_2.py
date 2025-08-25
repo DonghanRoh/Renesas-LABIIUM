@@ -4,7 +4,7 @@
 #   PSU:  E3631A (P6V/P25V/N25V), E3633A (OUT), HMP4040 (1..4), HMP4030 (1..3), HM8143 (U1/U2)
 #   DMM:  34410A, 34461A, 4040*, 34465A, 34470A, 2000, 3458A  (*4040 but not HMP4040)
 #   SMU:  2450, 2440, 2460, 2420, 2461
-#   FGEN: 33250A, 33600A
+#   FGEN: 33250A, 33612A
 #
 # Added:
 #   - Multi Meter / Source Monitor Unit / Function Generator tabs (model-aware enable/disable)
@@ -335,13 +335,13 @@ class GeneralSCPIGUI(tk.Tk):
     @staticmethod
     def _is_supported_smu(idn: str) -> bool:
         s = (idn or "").upper()
-        targets = ["MODEL 2420", "MODEL 2440", "MODEL 2450", "MODEL 2460", "MODEL 2461", " 2420", " 2440", " 2450", " 2460", " 2461"]
+        targets = ["MODEL 2420", "MODEL 2440", "MODEL 2450", "MODEL 2460", "MODEL 2461"]
         return any(t in s for t in targets)
 
     @staticmethod
     def _is_supported_fgen(idn: str) -> bool:
         s = (idn or "").upper()
-        return ("33250A" in s) or ("33600A" in s)
+        return ("33250A" in s) or ("33612A" in s)
 
     # ---------- DMM tab ----------
     def _build_dmm_controls(self, parent):

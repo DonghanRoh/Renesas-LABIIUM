@@ -3,7 +3,7 @@ from tkinter import ttk, messagebox
 from . import common
 
 class PowerSupplyTab:
-    """Power Supply tab UI (per-model, single-channel control, per-channel readback).
+    """Power Supply tab UI (single-channel control; English-only).
 
     Models (detected via common.detect_psu_model):
       - E3631A (channels: P6V/P25V/N25V)
@@ -17,8 +17,11 @@ class PowerSupplyTab:
       - Protection features removed (no OVP/OCP).
       - No "All ON / All OFF".
       - English-only UI text.
-      - Added a "Per-Channel Readback" panel:
-          For every channel, show "Query V" / "Query I" buttons and read-only fields.
+      - Readback panel shows V/I for the selected channel only.
+      - HM8143 specifics:
+          * Output ON/OFF uses OP1 / OP0 (global for the supply).
+          * Query State uses STA (text status).
+          * Actual (measured) values use MUx / MIx; RUx / RIx are used only for setpoints.
     """
 
     def __init__(self, notebook: ttk.Notebook, get_inst, get_idn, log_fn, status_var: tk.StringVar):
@@ -43,12 +46,8 @@ class PowerSupplyTab:
         self.meas_v_var = tk.StringVar(value="")
         self.meas_i_var = tk.StringVar(value="")
 
-        # Per-channel readback store: {chan: (v_var, i_var)}
-        self._per_ch_vars = {}
-
-        # Panels that are rebuilt on model change
+        # Panel rebuilt on model change
         self._model_info_panel = None
-        self._per_ch_panel = None
 
         self._build_ui(self.frame)
 
@@ -89,14 +88,14 @@ class PowerSupplyTab:
         for c, w in enumerate([0, 1, 0, 1]):
             sp.grid_columnconfigure(c, weight=w)
 
-        # Output controls
+        # Output controls (single channel UI; HM8143 uses global OP1/OP0 internally)
         out = ttk.LabelFrame(parent, text="Output")
         out.pack(fill="x", padx=10, pady=(0, 6))
         ttk.Button(out, text="Output ON", command=lambda: self.output(True)).grid(row=0, column=2, padx=6, pady=6)
         ttk.Button(out, text="Output OFF", command=lambda: self.output(False)).grid(row=0, column=3, padx=6, pady=6)
 
         ttk.Label(out, text="State:").grid(row=0, column=0, padx=6, pady=6, sticky="e")
-        ttk.Entry(out, textvariable=self.output_state_var, state="readonly", width=30).grid(
+        ttk.Entry(out, textvariable=self.output_state_var, state="readonly", width=40).grid(
             row=0, column=1, padx=(0, 12), pady=6, sticky="w"
         )
         ttk.Button(out, text="Query State", command=self.query_output_state).grid(row=0, column=4, padx=6, pady=6)
@@ -106,7 +105,7 @@ class PowerSupplyTab:
 
         # Readback for selected channel
         meas = ttk.LabelFrame(parent, text="Readback (Selected Channel)")
-        meas.pack(fill="x", padx=10, pady=(0, 6))
+        meas.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Label(meas, text="V_meas (V):").grid(row=0, column=0, padx=6, pady=6, sticky="e")
         ttk.Entry(meas, textvariable=self.meas_v_var, width=12, state="readonly").grid(
             row=0, column=1, padx=(0, 12), pady=6, sticky="w"
@@ -124,10 +123,6 @@ class PowerSupplyTab:
         for c, w in enumerate([0, 1, 0, 0]):
             meas.grid_columnconfigure(c, weight=w)
 
-        # Per-Channel Readback (rebuilt per model)
-        self._per_ch_panel = ttk.LabelFrame(parent, text="Per-Channel Readback")
-        self._per_ch_panel.pack(fill="x", padx=10, pady=(0, 10))
-
     # ---------- lifecycle ----------
     def set_enabled(self, enabled: bool):
         try:
@@ -143,7 +138,10 @@ class PowerSupplyTab:
             self.channel_combo["values"] = []
             self.set_enabled(False)
             self._rebuild_model_info("(Unknown)", [])
-            self._rebuild_per_channel([])
+            # reset readbacks
+            self.output_state_var.set("(unknown)")
+            self.meas_v_var.set("")
+            self.meas_i_var.set("")
             return
 
         model = common.detect_psu_model(idn)
@@ -154,7 +152,9 @@ class PowerSupplyTab:
             self.channel_combo["values"] = []
             self.set_enabled(False)
             self._rebuild_model_info("(Unknown)", [])
-            self._rebuild_per_channel([])
+            self.output_state_var.set("(unknown)")
+            self.meas_v_var.set("")
+            self.meas_i_var.set("")
             return
 
         self.set_enabled(True)
@@ -163,7 +163,6 @@ class PowerSupplyTab:
             self.channel_var.set(chs[0])
 
         self._rebuild_model_info(model, chs)
-        self._rebuild_per_channel(chs)
 
         # reset readbacks
         self.output_state_var.set("(unknown)")
@@ -189,44 +188,11 @@ class PowerSupplyTab:
         elif model == "E3633A":
             text = "Keysight E3633A — single output: OUT."
         elif model == "HM8143":
-            text = "HAMEG HM8143 — channels: U1 / U2 (SU/SI, RU/RI used)."
+            text = "HAMEG HM8143 — channels: U1 / U2. Output ON/OFF is global (OP1/OP0)."
         else:
             text = "Unknown PSU model. Generic SCPI will be used."
 
         ttk.Label(self._model_info_panel, text=text).pack(anchor="w")
-
-    def _rebuild_per_channel(self, chs):
-        self._clear_children(self._per_ch_panel)
-        self._per_ch_vars = {}
-
-        if not chs:
-            ttk.Label(self._per_ch_panel, text="No channels.").pack(anchor="w", padx=6, pady=6)
-            return
-
-        # Table header
-        hdr = ttk.Frame(self._per_ch_panel)
-        hdr.pack(fill="x", padx=6, pady=(6, 2))
-        ttk.Label(hdr, text="Channel", width=12).grid(row=0, column=0, sticky="w")
-        ttk.Label(hdr, text="V_meas (V)", width=16).grid(row=0, column=1, sticky="w")
-        ttk.Label(hdr, text="I_meas (A)", width=16).grid(row=0, column=2, sticky="w")
-        ttk.Label(hdr, text="Actions").grid(row=0, column=3, sticky="w")
-
-        # Rows
-        for r, ch in enumerate(chs, start=1):
-            row = ttk.Frame(self._per_ch_panel)
-            row.pack(fill="x", padx=6, pady=2)
-
-            ttk.Label(row, text=str(ch), width=12).grid(row=0, column=0, sticky="w")
-            v_var = tk.StringVar(value="")
-            i_var = tk.StringVar(value="")
-            self._per_ch_vars[ch] = (v_var, i_var)
-
-            ttk.Entry(row, textvariable=v_var, width=16, state="readonly").grid(row=0, column=1, sticky="w", padx=(0, 8))
-            ttk.Entry(row, textvariable=i_var, width=16, state="readonly").grid(row=0, column=2, sticky="w", padx=(0, 8))
-
-            ttk.Button(row, text="Query V", command=lambda c=ch: self._per_ch_query_v(c)).grid(row=0, column=3, padx=2)
-            ttk.Button(row, text="Query I", command=lambda c=ch: self._per_ch_query_i(c)).grid(row=0, column=4, padx=2)
-            ttk.Button(row, text="Query Both", command=lambda c=ch: self._per_ch_query_both(c)).grid(row=0, column=5, padx=2)
 
     # ---------- helpers ----------
     def _require_inst(self):
@@ -252,7 +218,7 @@ class PowerSupplyTab:
     # ---------- set/query setpoints (selected channel) ----------
     def set_voltage(self):
         try:
-            inst = self._require_inst(); 
+            inst = self._require_inst()
             if not inst: return
             idn = self.get_idn()
             model = common.detect_psu_model(idn)
@@ -274,7 +240,7 @@ class PowerSupplyTab:
 
     def set_current(self):
         try:
-            inst = self._require_inst(); 
+            inst = self._require_inst()
             if not inst: return
             idn = self.get_idn()
             model = common.detect_psu_model(idn)
@@ -295,8 +261,9 @@ class PowerSupplyTab:
             messagebox.showerror("Set Current failed", str(e))
 
     def query_voltage(self):
+        """Query set VOLT (not measured value)."""
         try:
-            inst = self._require_inst(); 
+            inst = self._require_inst()
             if not inst: return
             idn = self.get_idn()
             model = common.detect_psu_model(idn)
@@ -318,8 +285,9 @@ class PowerSupplyTab:
             messagebox.showerror("Query Voltage failed", str(e))
 
     def query_current(self):
+        """Query set CURR limit (not measured value)."""
         try:
-            inst = self._require_inst(); 
+            inst = self._require_inst()
             if not inst: return
             idn = self.get_idn()
             model = common.detect_psu_model(idn)
@@ -340,10 +308,10 @@ class PowerSupplyTab:
         except Exception as e:
             messagebox.showerror("Query Current failed", str(e))
 
-    # ---------- output (selected channel) ----------
+    # ---------- output ----------
     def output(self, on: bool):
         try:
-            inst = self._require_inst(); 
+            inst = self._require_inst()
             if not inst: return
             idn = self.get_idn()
             model = common.detect_psu_model(idn)
@@ -351,11 +319,12 @@ class PowerSupplyTab:
             val = "ON" if on else "OFF"
 
             if model == "HM8143":
-                # No explicit per-channel OUTP in this generic template; try global
-                sequences = [[f"OUTP {val}"], [f"OUTPut:STATe {val}"]]
-                common.try_sequences(inst, sequences)
+                # HM8143 uses OP1 / OP0 (global) rather than OUTP per-channel.
+                cmd = "OP1" if on else "OP0"
+                inst.write(cmd)
             else:
                 self._select_channel_if_needed(model, ch)
+                # Generic OUTP sequence
                 sequences = [[f"OUTP {val}"], [f"OUTPut:STATe {val}"]]
                 common.try_sequences(inst, sequences)
 
@@ -365,15 +334,21 @@ class PowerSupplyTab:
 
     def query_output_state(self):
         try:
-            inst = self._require_inst(); 
+            inst = self._require_inst()
             if not inst: return
             idn = self.get_idn()
             model = common.detect_psu_model(idn)
             ch = common.trim(self.channel_var.get())
 
-            if model != "HM8143":
-                self._select_channel_if_needed(model, ch)
+            if model == "HM8143":
+                # 'STA' returns a text like: OP1 CV1 CC2 RM1 (or OP0 --- --- RM1)  ➜ show raw.
+                resp = (inst.query("STA") or "").strip()
+                self.output_state_var.set(resp or "(unknown)")
+                self.log(f"[PSU] State ({model}) -> {resp}")
+                return
 
+            # Others: query ON/OFF
+            self._select_channel_if_needed(model, ch)
             candidates = ["OUTP?", "OUTPut:STATe?"]
             resp = None
             for cmd in candidates:
@@ -384,32 +359,28 @@ class PowerSupplyTab:
                         break
                 except Exception:
                     continue
-
             self.output_state_var.set(self._parse_onoff(resp))
             self.log(f"[PSU] Output State on {ch} ({model}) -> {resp}")
         except Exception as e:
             messagebox.showerror("Query Output State failed", str(e))
 
-    # ---------- readback (selected channel) ----------
+    # ---------- readback (selected channel; actual values) ----------
     def measure_voltage(self):
         try:
-            inst = self._require_inst(); 
+            inst = self._require_inst()
             if not inst: return
             idn = self.get_idn()
             model = common.detect_psu_model(idn)
             ch = common.trim(self.channel_var.get())
-
-            if model != "HM8143":
-                self._select_channel_if_needed(model, ch)
+            resp = None
 
             if model == "HM8143":
+                # MUx = measured (actual) voltage
                 idx = common.hm8143_ch_index(ch)
-                resp = inst.query(f"RU{idx}").strip()
+                resp = (inst.query(f"MU{idx}") or "").strip()
             else:
-                # Try typical MEAS commands
-                candidates = ["MEAS:VOLT?", "MEAS:VOLT:DC?"]
-                resp = None
-                for c in candidates:
+                self._select_channel_if_needed(model, ch)
+                for c in ["MEAS:VOLT?", "MEAS:VOLT:DC?"]:
                     try:
                         r = (inst.query(c) or "").strip()
                         if r:
@@ -420,28 +391,26 @@ class PowerSupplyTab:
 
             if resp:
                 self.meas_v_var.set(common.extract_number(resp))
-                self.log(f"[PSU] V_meas on {ch} ({model}) -> {resp}")
+            self.log(f"[PSU] V_meas on {ch} ({model}) -> {resp}")
         except Exception as e:
             messagebox.showerror("Measure Voltage failed", str(e))
 
     def measure_current(self):
         try:
-            inst = self._require_inst(); 
+            inst = self._require_inst()
             if not inst: return
             idn = self.get_idn()
             model = common.detect_psu_model(idn)
             ch = common.trim(self.channel_var.get())
-
-            if model != "HM8143":
-                self._select_channel_if_needed(model, ch)
+            resp = None
 
             if model == "HM8143":
+                # MIx = measured (actual) current
                 idx = common.hm8143_ch_index(ch)
-                resp = inst.query(f"RI{idx}").strip()
+                resp = (inst.query(f"MI{idx}") or "").strip()
             else:
-                candidates = ["MEAS:CURR?", "MEAS:CURR:DC?"]
-                resp = None
-                for c in candidates:
+                self._select_channel_if_needed(model, ch)
+                for c in ["MEAS:CURR?", "MEAS:CURR:DC?"]:
                     try:
                         r = (inst.query(c) or "").strip()
                         if r:
@@ -452,75 +421,10 @@ class PowerSupplyTab:
 
             if resp:
                 self.meas_i_var.set(common.extract_number(resp))
-                self.log(f"[PSU] I_meas on {ch} ({model}) -> {resp}")
+            self.log(f"[PSU] I_meas on {ch} ({model}) -> {resp}")
         except Exception as e:
             messagebox.showerror("Measure Current failed", str(e))
 
     def measure_both(self):
         self.measure_voltage()
         self.measure_current()
-
-    # ---------- per-channel readback (buttons for each channel) ----------
-    def _per_ch_query_v(self, ch: str):
-        try:
-            inst = self._require_inst(); 
-            if not inst: return
-            idn = self.get_idn()
-            model = common.detect_psu_model(idn)
-
-            if model == "HM8143":
-                idx = common.hm8143_ch_index(ch)
-                resp = inst.query(f"RU{idx}").strip()
-            else:
-                common.psu_select_channel(inst, model, ch)
-                candidates = ["MEAS:VOLT?", "MEAS:VOLT:DC?"]
-                resp = None
-                for c in candidates:
-                    try:
-                        r = (inst.query(c) or "").strip()
-                        if r:
-                            resp = r
-                            break
-                    except Exception:
-                        continue
-
-            if ch in self._per_ch_vars and resp:
-                v_var, _ = self._per_ch_vars[ch]
-                v_var.set(common.extract_number(resp))
-            self.log(f"[PSU] [Per-Channel] V_meas on {ch} -> {resp}")
-        except Exception as e:
-            messagebox.showerror("Per-Channel V query failed", str(e))
-
-    def _per_ch_query_i(self, ch: str):
-        try:
-            inst = self._require_inst(); 
-            if not inst: return
-            idn = self.get_idn()
-            model = common.detect_psu_model(idn)
-
-            if model == "HM8143":
-                idx = common.hm8143_ch_index(ch)
-                resp = inst.query(f"RI{idx}").strip()
-            else:
-                common.psu_select_channel(inst, model, ch)
-                candidates = ["MEAS:CURR?", "MEAS:CURR:DC?"]
-                resp = None
-                for c in candidates:
-                    try:
-                        r = (inst.query(c) or "").strip()
-                        if r:
-                            resp = r
-                            break
-                    except Exception:
-                        continue
-
-            if ch in self._per_ch_vars and resp:
-                _, i_var = self._per_ch_vars[ch]
-                i_var.set(common.extract_number(resp))
-            self.log(f"[PSU] [Per-Channel] I_meas on {ch} -> {resp}")
-        except Exception as e:
-            messagebox.showerror("Per-Channel I query failed", str(e))
-
-    def _per_ch_query_both(self, ch: str):
-        self._per_ch_query_v(ch)
-        self._per_ch_query_i(ch)

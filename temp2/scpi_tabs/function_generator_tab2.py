@@ -14,7 +14,11 @@ def _num_si(s):
     if not s:
         return None, ""
     # normalize
-    s = s.replace("°", " deg").replace("Sa/s", " SPS").replace("Vpp", " Vpp").replace("Vrms"," Vrms").replace("dBm"," dBm")
+    s = (s.replace("°", " deg")
+           .replace("Sa/s", " SPS")
+           .replace("Vpp", " Vpp")
+           .replace("Vrms"," Vrms")
+           .replace("dBm"," dBm"))
     m = re.search(r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*([GMkmunµp]?)\s*([A-Za-z/%]+)?", s)
     if not m:
         try:
@@ -32,23 +36,9 @@ def _parse(s, kind, default=None):
     kind ∈ {'freq','srate','volt','offs','phase','time','percent','bitrate','band'}
     returns base units: Hz, Sa/s, V, V, deg, s, %, Hz, Hz
     """
-    v, u = _num_si(s)
+    v, _u = _num_si(s)
     if v is None:
         return default
-    u = u.lower()
-    if kind in ("freq","bitrate","band"):
-        return v
-    if kind == "srate":  # Sa/s
-        return v
-    if kind in ("volt","offs"):
-        # we treat numbers as volts regardless of 'v','vpp' tokens; caller should know context
-        return v
-    if kind == "phase":
-        return v
-    if kind == "time":
-        return v
-    if kind == "percent":
-        return v
     return v
 
 def _fnum(s, default=0.0):
@@ -59,11 +49,10 @@ def _fnum(s, default=0.0):
 
 class FunctionGeneratorTab:
     """
-    Keysight/Agilent 33612A 전용 간소 UI
-      - 파형: 드롭다운
-      - 파라미터: 모두 수동 입력(Entry), 파형에 따라 필요한 필드만 표시
+    Keysight/Agilent 33612A 전용 UI
+      - 채널1/채널2 각각: Waveform 드롭다운 + 해당 파형의 파라미터를 모두 수동 입력(Entry)
       - 채널1/채널2 각각: Output ON/OFF, Output Load(50Ω/High Z/Specify), Range(Auto/Hold)
-    주의: APPLy 명령이 Autorange를 다시 켤 수 있으므로, Range=Hold일 때는 파형 적용 후 Autorange OFF 재적용.
+    주의: APPLy 명령이 Autorange를 다시 켤 수 있으므로, Range=Hold면 파형 적용 후 Autorange OFF 재적용.
     """
 
     WF_MAP = {
@@ -71,7 +60,23 @@ class FunctionGeneratorTab:
         "Arb": "ARB", "Triangle": "TRI", "Noise": "NOIS", "PRBS": "PRBS", "DC": "DC",
     }
 
-    # ---- UI state ----
+    PARAM_LAYOUTS = {
+        # label -> key
+        "Sine":      [("Frequency", "freq"), ("Amplitude (Vpp)", "amp"), ("Offset (V)", "offs"), ("Phase (deg)", "phase")],
+        "Square":    [("Frequency", "freq"), ("Amplitude (Vpp)", "amp"), ("Offset (V)", "offs"), ("Phase (deg)", "phase")],
+        "Triangle":  [("Frequency", "freq"), ("Amplitude (Vpp)", "amp"), ("Offset (V)", "offs"), ("Phase (deg)", "phase")],
+        "Ramp":      [("Frequency", "freq"), ("Amplitude (Vpp)", "amp"), ("Offset (V)", "offs"), ("Phase (deg)", "phase"),
+                      ("Symmetry (%)", "symm")],
+        "Pulse":     [("Frequency", "freq"), ("Amplitude (Vpp)", "amp"), ("Offset (V)", "offs"), ("Phase (deg)", "phase"),
+                      ("Pulse Width (s)", "pwidth"), ("Lead Edge (s)", "lead"), ("Trail Edge (s)", "trail")],
+        "Arb":       [("Sample Rate (Sa/s)", "srate"), ("Amplitude (Vpp)", "amp"), ("Offset (V)", "offs"),
+                      ("Arb Phase (deg)", "aphase")],
+        "Noise":     [("Bandwidth (Hz)", "bw"), ("Amplitude (Vpp)", "amp"), ("Offset (V)", "offs")],
+        "PRBS":      [("Bit Rate (Hz)", "brate"), ("Amplitude (Vpp)", "amp"), ("Offset (V)", "offs"),
+                      ("Edge Time (s)", "etime"), ("Phase (deg)", "phase")],
+        "DC":        [("Offset (V)", "offs")],
+    }
+
     def __init__(self, notebook: ttk.Notebook, get_inst, get_idn, log_fn, status_var: tk.StringVar):
         self.notebook = notebook
         self.get_inst = get_inst
@@ -84,91 +89,81 @@ class FunctionGeneratorTab:
 
         self._is_33612a = False
 
-        # top-level controls for waveform setup (target channel to apply)
-        self.model_var = tk.StringVar(value="(No FGEN)")
-        self.target_ch_var = tk.StringVar(value="1")
-        self.wave_var = tk.StringVar(value="Sine")
-
-        # dynamic param vars (created per waveform)
-        self._param_vars = {}  # name -> tk.StringVar
-
-        # per-channel output/load/range state
-        self.ch = {
-            "1": {
-                "out_var": tk.StringVar(value="Off"),
-                "load_mode": tk.StringVar(value="50 Ω"),   # "50 Ω" | "High Z" | "Specify"
-                "load_val": tk.StringVar(value="50"),
-                "range_mode": tk.StringVar(value="Auto"),  # "Auto" | "Hold"
-            },
-            "2": {
-                "out_var": tk.StringVar(value="Off"),
-                "load_mode": tk.StringVar(value="50 Ω"),
-                "load_val": tk.StringVar(value="50"),
-                "range_mode": tk.StringVar(value="Auto"),
-            },
-        }
-
-        self._build_ui(self.frame)
-        self._wire_events()
-
-    # ================= UI =================
-    def _build_ui(self, parent):
-        # ---- Waveform & Parameters ----
-        top = ttk.LabelFrame(parent, text="33612A Waveform Setup")
+        # ------- top header -------
+        top = ttk.LabelFrame(self.frame, text="33612A")
         top.pack(fill="x", padx=10, pady=10)
-
+        self.model_var = tk.StringVar(value="(No FGEN)")
         ttk.Label(top, text="Model:").grid(row=0, column=0, padx=6, pady=8, sticky="e")
         ttk.Label(top, textvariable=self.model_var).grid(row=0, column=1, padx=(0,12), pady=8, sticky="w")
+        for c in range(4):
+            top.grid_columnconfigure(c, weight=1)
 
-        ttk.Label(top, text="Channel:").grid(row=0, column=2, padx=6, pady=8, sticky="e")
-        ttk.Combobox(top, textvariable=self.target_ch_var, state="readonly", values=["1","2"], width=6)\
-            .grid(row=0, column=3, padx=(0,12), pady=8, sticky="w")
+        # ------- channels side-by-side -------
+        chf = ttk.Frame(self.frame)
+        chf.pack(fill="both", expand=True, padx=10, pady=(0,10))
 
-        ttk.Label(top, text="Waveform:").grid(row=1, column=0, padx=6, pady=8, sticky="e")
-        self.wave_combo = ttk.Combobox(top, textvariable=self.wave_var, state="readonly",
-                                       values=list(self.WF_MAP.keys()), width=12)
-        self.wave_combo.grid(row=1, column=1, padx=(0,12), pady=8, sticky="w")
+        # Per-channel state + UI containers
+        self.ch = {
+            "1": self._init_channel_state("1"),
+            "2": self._init_channel_state("2"),
+        }
 
-        # dynamic parameter frame (entries only)
-        self.paramsf = ttk.LabelFrame(parent, text="Parameters (manual input)")
-        self.paramsf.pack(fill="x", padx=10, pady=(0,10))
+        self._build_channel_ui(chf, "1", col=0)
+        self._build_channel_ui(chf, "2", col=1)
 
-        # parameter rows will be created by _render_params_for_wave
-        self._render_params_for_wave("Sine")
+        chf.grid_columnconfigure(0, weight=1)
+        chf.grid_columnconfigure(1, weight=1)
 
-        # apply waveform button
-        btns = ttk.Frame(parent)
-        btns.pack(fill="x", padx=10, pady=(0,10))
-        ttk.Button(btns, text="Apply Waveform To Channel", command=self.apply_waveform).pack(side="left", padx=6)
+    # ------------- per-channel state -------------
+    def _init_channel_state(self, ch):
+        return {
+            "wave_var": tk.StringVar(value="Sine"),
+            "param_vars": {},  # key -> StringVar
+            "out_var": tk.StringVar(value="Off"),
+            "load_mode": tk.StringVar(value="50 Ω"),
+            "load_val": tk.StringVar(value="50"),
+            "range_mode": tk.StringVar(value="Auto"),
+            # UI handles
+            "paramsf": None,
+            "load_entry": None,
+        }
 
-        # ---- Per-Channel Output/Load/Range ----
-        chf = ttk.LabelFrame(parent, text="Channel Outputs")
-        chf.pack(fill="x", padx=10, pady=(0,10))
+    # ------------- build per-channel UI -------------
+    def _build_channel_ui(self, parent, ch: str, col: int):
+        outer = ttk.LabelFrame(parent, text=f"Channel {ch}")
+        outer.grid(row=0, column=col, padx=6, pady=6, sticky="nsew")
 
-        self._make_channel_block(chf, "1", col=0)
-        self._make_channel_block(chf, "2", col=1)
+        # Waveform selector
+        ttk.Label(outer, text="Waveform:").grid(row=0, column=0, padx=6, pady=6, sticky="e")
+        wave_cb = ttk.Combobox(outer, textvariable=self.ch[ch]["wave_var"], state="readonly",
+                               values=list(self.WF_MAP.keys()), width=12)
+        wave_cb.grid(row=0, column=1, padx=(0,12), pady=6, sticky="w")
 
-        for c in range(2):
-            chf.grid_columnconfigure(c, weight=1)
+        # Parameters frame (dynamic entries)
+        paramsf = ttk.LabelFrame(outer, text="Parameters")
+        paramsf.grid(row=1, column=0, columnspan=4, padx=6, pady=6, sticky="nsew")
+        self.ch[ch]["paramsf"] = paramsf
+        self._render_params_for_wave(ch)  # initial
 
-    def _make_channel_block(self, parent, ch, col=0):
-        f = ttk.LabelFrame(parent, text=f"Channel {ch}")
-        f.grid(row=0, column=col, padx=6, pady=6, sticky="nsew")
+        # Output/Load/Range block
+        io = ttk.LabelFrame(outer, text="Output / Load / Range")
+        io.grid(row=2, column=0, columnspan=4, padx=6, pady=6, sticky="nsew")
 
         # Output
-        ttk.Label(f, text="Output:").grid(row=0, column=0, padx=6, pady=6, sticky="e")
-        ttk.Combobox(f, textvariable=self.ch[ch]["out_var"], state="readonly",
+        ttk.Label(io, text="Output:").grid(row=0, column=0, padx=6, pady=6, sticky="e")
+        ttk.Combobox(io, textvariable=self.ch[ch]["out_var"], state="readonly",
                      values=["Off","On"], width=8).grid(row=0, column=1, padx=(0,12), pady=6, sticky="w")
 
         # Load
-        ttk.Label(f, text="Output Load:").grid(row=1, column=0, padx=6, pady=6, sticky="e")
-        load_cb = ttk.Combobox(f, textvariable=self.ch[ch]["load_mode"], state="readonly",
+        ttk.Label(io, text="Output Load:").grid(row=1, column=0, padx=6, pady=6, sticky="e")
+        load_cb = ttk.Combobox(io, textvariable=self.ch[ch]["load_mode"], state="readonly",
                                values=["50 Ω","High Z","Specify"], width=10)
         load_cb.grid(row=1, column=1, padx=(0,12), pady=6, sticky="w")
 
-        ttk.Label(f, text="Ω (Specify):").grid(row=1, column=2, padx=6, pady=6, sticky="e")
-        load_en = ttk.Entry(f, textvariable=self.ch[ch]["load_val"], width=10)
+        ttk.Label(io, text="Ω (Specify):").grid(row=1, column=2, padx=6, pady=6, sticky="e")
+        load_en = ttk.Entry(io, textvariable=self.ch[ch]["load_val"], width=10)
         load_en.grid(row=1, column=3, padx=(0,12), pady=6, sticky="w")
+        self.ch[ch]["load_entry"] = load_en
 
         def _toggle_load_entry(*_):
             mode = (self.ch[ch]["load_mode"].get() or "50 Ω")
@@ -176,83 +171,58 @@ class FunctionGeneratorTab:
             try: load_en.config(state=state)
             except Exception: pass
         load_cb.bind("<<ComboboxSelected>>", _toggle_load_entry)
-        f.after(0, _toggle_load_entry)  # init
+        io.after(0, _toggle_load_entry)
 
         # Range
-        ttk.Label(f, text="Range:").grid(row=2, column=0, padx=6, pady=6, sticky="e")
-        ttk.Combobox(f, textvariable=self.ch[ch]["range_mode"], state="readonly",
+        ttk.Label(io, text="Range:").grid(row=2, column=0, padx=6, pady=6, sticky="e")
+        ttk.Combobox(io, textvariable=self.ch[ch]["range_mode"], state="readonly",
                      values=["Auto","Hold"], width=8).grid(row=2, column=1, padx=(0,12), pady=6, sticky="w")
 
-        # Apply button
-        ttk.Button(f, text=f"Apply CH{ch}", command=lambda ch=ch: self.apply_channel_settings(ch))\
-            .grid(row=3, column=0, columnspan=4, padx=6, pady=8, sticky="e")
+        # Buttons
+        btns = ttk.Frame(outer)
+        btns.grid(row=3, column=0, columnspan=4, padx=6, pady=6, sticky="e")
+        ttk.Button(btns, text=f"Apply Waveform (CH{ch})", command=lambda ch=ch: self.apply_waveform(ch)).pack(side="left", padx=4)
+        ttk.Button(btns, text=f"Apply CH{ch} (Output/Load/Range)", command=lambda ch=ch: self.apply_channel_settings(ch)).pack(side="left", padx=4)
 
         for c in range(4):
-            f.grid_columnconfigure(c, weight=1)
+            outer.grid_columnconfigure(c, weight=1)
+            io.grid_columnconfigure(c, weight=1)
 
-    def _wire_events(self):
-        self.wave_combo.bind("<<ComboboxSelected>>", lambda *_: self._render_params_for_wave(self.wave_var.get()))
+        # Wire: waveform change -> rebuild params
+        wave_cb.bind("<<ComboboxSelected>>", lambda *_: self._render_params_for_wave(ch))
 
-    def _clear_params(self):
-        for w in list(self.paramsf.winfo_children()):
+    # ------------- dynamic params per channel -------------
+    def _clear_params(self, ch: str):
+        pf = self.ch[ch]["paramsf"]
+        for w in list(pf.winfo_children()):
             try: w.destroy()
             except Exception: pass
-        self._param_vars.clear()
+        self.ch[ch]["param_vars"].clear()
 
-    def _render_params_for_wave(self, wave_name: str):
-        """Build parameter entries depending on waveform; all are free-text Entries."""
-        self._clear_params()
-        w = wave_name
-        row = 0
+    def _render_params_for_wave(self, ch: str):
+        pf = self.ch[ch]["paramsf"]
+        self._clear_params(ch)
+        wave = self.ch[ch]["wave_var"].get()
+        layout = self.PARAM_LAYOUTS.get(wave, self.PARAM_LAYOUTS["Sine"])
 
-        def add_param(label, key, hint=""):
-            ttk.Label(self.paramsf, text=label + ":").grid(row=row, column=0, padx=6, pady=6, sticky="e")
+        for row, (label, key) in enumerate(layout):
+            ttk.Label(pf, text=label + ":").grid(row=row, column=0, padx=6, pady=6, sticky="e")
             var = tk.StringVar(value="")
-            e = ttk.Entry(self.paramsf, textvariable=var, width=18)
-            e.grid(row=row, column=1, padx=(0,12), pady=6, sticky="w")
+            ent = ttk.Entry(pf, textvariable=var, width=18)
+            ent.grid(row=row, column=1, padx=(0,12), pady=6, sticky="w")
+            # hints (optional)
+            hint = {
+                "freq":"e.g. 1 kHz", "amp":"e.g. 2 Vpp", "offs":"e.g. 0.1 V", "phase":"e.g. 0",
+                "symm":"e.g. 50", "pwidth":"e.g. 10 us", "lead":"e.g. 10 ns", "trail":"e.g. 10 ns",
+                "srate":"e.g. 1 MSa/s", "aphase":"e.g. 0", "bw":"e.g. 1 MHz", "brate":"e.g. 1 MHz",
+                "etime":"e.g. 10 ns"
+            }.get(key, "")
             if hint:
-                ttk.Label(self.paramsf, text=hint, foreground="#666").grid(row=row, column=2, padx=6, pady=6, sticky="w")
-            self._param_vars[key] = var
-
-        # Common sets per waveform
-        if w in ("Sine","Square","Ramp","Triangle"):
-            add_param("Frequency", "freq", "e.g. 1 kHz")
-            add_param("Amplitude (Vpp)", "amp", "e.g. 2 Vpp")
-            add_param("Offset (V)", "offs", "e.g. 0.1 V")
-            add_param("Phase (deg)", "phase", "e.g. 0")
-            if w == "Ramp":
-                add_param("Symmetry (%)", "symm", "e.g. 50")
-        elif w == "Pulse":
-            add_param("Frequency", "freq", "e.g. 10 kHz")
-            add_param("Amplitude (Vpp)", "amp", "e.g. 1 Vpp")
-            add_param("Offset (V)", "offs", "e.g. 0 V")
-            add_param("Phase (deg)", "phase", "e.g. 0")
-            add_param("Pulse Width (s)", "pwidth", "e.g. 10 us")
-            add_param("Lead Edge (s)", "lead", "e.g. 10 ns")
-            add_param("Trail Edge (s)", "trail", "e.g. 10 ns")
-        elif w == "Arb":
-            add_param("Sample Rate (Sa/s)", "srate", "e.g. 1 MSa/s")
-            add_param("Amplitude (Vpp)", "amp", "e.g. 1 Vpp")
-            add_param("Offset (V)", "offs", "e.g. 0 V")
-            add_param("Arb Phase (deg)", "aphase", "e.g. 0")
-        elif w == "Noise":
-            add_param("Bandwidth (Hz)", "bw", "e.g. 1 MHz")
-            add_param("Amplitude (Vpp)", "amp", "e.g. 0.5 Vpp")
-            add_param("Offset (V)", "offs", "e.g. 0 V")
-        elif w == "PRBS":
-            add_param("Bit Rate (Hz)", "brate", "e.g. 1 MHz")
-            add_param("Amplitude (Vpp)", "amp", "e.g. 1 Vpp")
-            add_param("Offset (V)", "offs", "e.g. 0 V")
-            add_param("Edge Time (s)", "etime", "e.g. 10 ns")
-            add_param("Phase (deg)", "phase", "e.g. 0")
-        elif w == "DC":
-            add_param("Offset (V)", "offs", "e.g. -2.5 V")
-        else:
-            # default
-            add_param("Frequency", "freq"); add_param("Amplitude (Vpp)", "amp"); add_param("Offset (V)", "offs"); add_param("Phase (deg)", "phase")
+                ttk.Label(pf, text=hint, foreground="#666").grid(row=row, column=2, padx=6, pady=6, sticky="w")
+            self.ch[ch]["param_vars"][key] = var
 
         for c in range(3):
-            self.paramsf.grid_columnconfigure(c, weight=1)
+            pf.grid_columnconfigure(c, weight=1)
 
     # ================= Device state =================
     def set_enabled(self, enabled: bool):
@@ -292,7 +262,11 @@ class FunctionGeneratorTab:
 
             # Output ON/OFF
             val = "ON" if (self.ch[ch]["out_var"].get() or "Off").lower() == "on" else "OFF"
-            common.try_sequences(inst, [[f"{outp}STAT {val}"], [f"{outp}{val}"], ["OUTP:STAT {0}".format(val)]])
+            common.try_sequences(inst, [
+                [f"{outp}STAT {val}"],
+                [f"{outp}{val}"],
+                ["OUTP:STAT {0}".format(val)]
+            ])
 
             # Output Load
             mode = (self.ch[ch]["load_mode"].get() or "50 Ω")
@@ -310,9 +284,15 @@ class FunctionGeneratorTab:
             # Range Auto/Hold  (Hold => VOLT:RANG:AUTO OFF)
             rmode = (self.ch[ch]["range_mode"].get() or "Auto").lower()
             if rmode == "auto":
-                common.try_sequences(inst, [[f"{src}VOLT:RANG:AUTO ON"], [f"{src}VOLT:RANG:AUTO ONCE"]])
+                common.try_sequences(inst, [
+                    [f"{src}VOLT:RANG:AUTO ON"],
+                    [f"{src}VOLT:RANG:AUTO ONCE"]
+                ])
             else:
-                common.try_sequences(inst, [[f"{src}VOLT:RANG:AUTO OFF"], [f"{src}VOLT:RANG:AUTO 0"]])
+                common.try_sequences(inst, [
+                    [f"{src}VOLT:RANG:AUTO OFF"],
+                    [f"{src}VOLT:RANG:AUTO 0"]
+                ])
 
             common.drain_error_queue(inst, self.log, "[FGEN]")
             self.log(f"[FGEN] CH{ch} -> OUT={val}, LOAD={mode}({self.ch[ch]['load_val'].get()}), RANGE={rmode}")
@@ -325,25 +305,31 @@ class FunctionGeneratorTab:
         try:
             if (self.ch[ch]["range_mode"].get() or "Auto").lower() == "hold":
                 src = self._src(ch)
-                common.try_sequences(self.get_inst(), [[f"{src}VOLT:RANG:AUTO OFF"], [f"{src}VOLT:RANG:AUTO 0"]])
+                common.try_sequences(self.get_inst(), [
+                    [f"{src}VOLT:RANG:AUTO OFF"],
+                    [f"{src}VOLT:RANG:AUTO 0"]
+                ])
         except Exception:
             pass
 
-    def apply_waveform(self):
-        """Apply waveform + manually-entered parameters to the selected channel."""
+    def apply_waveform(self, ch: str):
+        """Apply waveform + manually-entered parameters to the given channel."""
         try:
             inst = self.get_inst()
             if not inst or not self._is_33612a: return
-            ch = (self.target_ch_var.get() or "1").strip()
             src = self._src(ch)
-            wf_name = self.wave_var.get()
+            wf_name = self.ch[ch]["wave_var"].get()
             wf = self.WF_MAP.get(wf_name, "SIN")
 
             # switch function first
-            common.try_sequences(inst, [[f"{src}FUNC {wf}"], [f"{src}APPL:{wf}"]])
+            common.try_sequences(inst, [
+                [f"{src}FUNC {wf}"],
+                [f"{src}APPL:{wf}"]
+            ])
 
-            # read params (text -> base units)
-            gv = lambda key, kind, default=None: _parse(self._param_vars.get(key, tk.StringVar(value="")).get(), kind, default)
+            # params
+            pv = self.ch[ch]["param_vars"]
+            gv = lambda key, kind, default=None: _parse(pv.get(key, tk.StringVar(value="")).get(), kind, default)
 
             if wf in ("SIN","SQU","RAMP","TRI","PULS"):
                 freq  = gv("freq","freq", None)
@@ -351,35 +337,51 @@ class FunctionGeneratorTab:
                 offs  = gv("offs","offs", 0.0)
                 phase = gv("phase","phase", None)
 
-                # set unit to VPP (we interpret amplitude as Vpp)
+                # set unit to VPP (interpret amplitude as Vpp)
                 try: inst.write(f"{src}VOLT:UNIT VPP")
                 except Exception: pass
 
                 # try APPL first if all three given
                 if freq is not None and amp is not None and offs is not None:
                     common.try_sequences(inst, [[f"{src}APPL:{wf} {freq},{amp},{offs}"]])
+
                 # granular fallback
                 if freq  is not None: inst.write(f"{src}FREQ {freq}")
                 if amp   is not None: inst.write(f"{src}VOLT {amp}")
                 if offs  is not None: inst.write(f"{src}VOLT:OFFS {offs}")
                 if phase is not None:
-                    common.try_sequences(inst, [[f"{src}PHAS {phase}"], [f"{src}FUNC:PHAS {phase}"]])
+                    common.try_sequences(inst, [
+                        [f"{src}PHAS {phase}"],
+                        [f"{src}FUNC:PHAS {phase}"]
+                    ])
 
                 if wf == "RAMP":
                     symm = gv("symm","percent", None)
                     if symm is not None:
-                        common.try_sequences(inst, [[f"{src}RAMP:SYMM {symm}"], [f"{src}FUNC:RAMP:SYMM {symm}"]])
+                        common.try_sequences(inst, [
+                            [f"{src}RAMP:SYMM {symm}"],
+                            [f"{src}FUNC:RAMP:SYMM {symm}"]
+                        ])
 
                 if wf == "PULS":
                     pwidth = gv("pwidth","time", None)
                     lead   = gv("lead","time", None)
                     trail  = gv("trail","time", None)
                     if pwidth is not None:
-                        common.try_sequences(inst, [[f"{src}PULS:WIDT {pwidth}"], [f"{src}FUNC:PULS:WIDT {pwidth}"]])
+                        common.try_sequences(inst, [
+                            [f"{src}PULS:WIDT {pwidth}"],
+                            [f"{src}FUNC:PULS:WIDT {pwidth}"]
+                        ])
                     if lead   is not None:
-                        common.try_sequences(inst, [[f"{src}PULS:TRAN:LEAD {lead}"], [f"{src}PULS:TRAN:LEADing {lead}"]])
+                        common.try_sequences(inst, [
+                            [f"{src}PULS:TRAN:LEAD {lead}"],
+                            [f"{src}PULS:TRAN:LEADing {lead}"]
+                        ])
                     if trail  is not None:
-                        common.try_sequences(inst, [[f"{src}PULS:TRAN:TRA {trail}"], [f"{src}PULS:TRAN:TRAiling {trail}"]])
+                        common.try_sequences(inst, [
+                            [f"{src}PULS:TRAN:TRA {trail}"],
+                            [f"{src}PULS:TRAN:TRAiling {trail}"]
+                        ])
 
             elif wf == "ARB":
                 srate = gv("srate","srate", None)
@@ -387,9 +389,15 @@ class FunctionGeneratorTab:
                 offs  = gv("offs","offs", 0.0)
                 aphase= gv("aphase","phase", None)
                 if srate is not None:
-                    common.try_sequences(inst, [[f"{src}ARB:SRAT {srate}"], [f"{src}ARB:SRATe {srate}"]])
+                    common.try_sequences(inst, [
+                        [f"{src}ARB:SRAT {srate}"],
+                        [f"{src}ARB:SRATe {srate}"]
+                    ])
                 if aphase is not None:
-                    common.try_sequences(inst, [[f"{src}ARB:PHAS {aphase}"], [f"{src}FUNC:ARB:PHAS {aphase}"]])
+                    common.try_sequences(inst, [
+                        [f"{src}ARB:PHAS {aphase}"],
+                        [f"{src}FUNC:ARB:PHAS {aphase}"]
+                    ])
                 if amp is not None: inst.write(f"{src}VOLT {amp}")
                 if offs is not None: inst.write(f"{src}VOLT:OFFS {offs}")
 
@@ -398,7 +406,10 @@ class FunctionGeneratorTab:
                 amp  = gv("amp","volt", None)
                 offs = gv("offs","offs", 0.0)
                 if bw  is not None:
-                    common.try_sequences(inst, [[f"{src}NOIS:BAND {bw}"], [f"{src}FUNC:NOIS:BAND {bw}"]])
+                    common.try_sequences(inst, [
+                        [f"{src}NOIS:BAND {bw}"],
+                        [f"{src}FUNC:NOIS:BAND {bw}"]
+                    ])
                 if amp is not None: inst.write(f"{src}VOLT {amp}")
                 if offs is not None: inst.write(f"{src}VOLT:OFFS {offs}")
 
@@ -409,23 +420,35 @@ class FunctionGeneratorTab:
                 offs = gv("offs","offs", 0.0)
                 phase= gv("phase","phase", None)
                 if br is not None:
-                    common.try_sequences(inst, [[f"{src}PRBS:BRAT {br}"], [f"{src}FUNC:PRBS:BRAT {br}"]])
+                    common.try_sequences(inst, [
+                        [f"{src}PRBS:BRAT {br}"],
+                        [f"{src}FUNC:PRBS:BRAT {br}"]
+                    ])
                 if et is not None:
-                    common.try_sequences(inst, [[f"{src}PRBS:TRAN {et}"], [f"{src}FUNC:PRBS:TRAN {et}"]])
+                    common.try_sequences(inst, [
+                        [f"{src}PRBS:TRAN {et}"],
+                        [f"{src}FUNC:PRBS:TRAN {et}"]
+                    ])
                 if phase is not None:
-                    common.try_sequences(inst, [[f"{src}PHAS {phase}"], [f"{src}FUNC:PHAS {phase}"]])
+                    common.try_sequences(inst, [
+                        [f"{src}PHAS {phase}"],
+                        [f"{src}FUNC:PHAS {phase}"]
+                    ])
                 if amp is not None: inst.write(f"{src}VOLT {amp}")
                 if offs is not None: inst.write(f"{src}VOLT:OFFS {offs}")
 
             elif wf == "DC":
                 offs = gv("offs","offs", 0.0)
-                common.try_sequences(inst, [[f"{src}APPL:DC DEF,DEF,{offs}"], [f"{src}FUNC DC", f"{src}VOLT:OFFS {offs}"]])
+                common.try_sequences(inst, [
+                    [f"{src}APPL:DC DEF,DEF,{offs}"],
+                    [f"{src}FUNC DC", f"{src}VOLT:OFFS {offs}"]
+                ])
 
-            # Ensure HOLD range is kept if user requested it (APPL may re-enable autorange)
+            # Ensure HOLD range is kept if requested
             self._reapply_range_if_hold(ch)
 
             common.drain_error_queue(inst, self.log, "[FGEN]")
             self.log(f"[FGEN] Apply Waveform -> CH={ch}, WF={wf_name}")
-            self.status.set("Waveform applied.")
+            self.status.set(f"Waveform applied to CH{ch}.")
         except Exception as e:
             messagebox.showerror("FGEN Apply failed", str(e))

@@ -37,7 +37,6 @@ def _parse(s, kind, default=None):
         return default
     u = u.lower()
     if kind in ("freq","bitrate","band"):
-        # any of Hz/kHz/MHz prefixes handled by _num_si
         return v
     if kind == "srate":  # Sa/s
         return v
@@ -64,7 +63,7 @@ class FunctionGeneratorTab:
       - 파형: 드롭다운
       - 파라미터: 모두 수동 입력(Entry), 파형에 따라 필요한 필드만 표시
       - 채널1/채널2 각각: Output ON/OFF, Output Load(50Ω/High Z/Specify), Range(Auto/Hold)
-    주의: APPLy 명령이 Autorange를 다시 켜므로, Range=Hold일 때는 파형 적용 후 Autorange OFF를 재적용함.
+    주의: APPLy 명령이 Autorange를 다시 켤 수 있으므로, Range=Hold일 때는 파형 적용 후 Autorange OFF 재적용.
     """
 
     WF_MAP = {

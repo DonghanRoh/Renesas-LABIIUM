@@ -181,7 +181,7 @@ class MultiMeterTab:
         if self._is_3446x:
             keysight_3446x = {
                 "DCV": ["0.1 V", "1 V", "10 V", "100 V", "1000 V"],
-                "DCI": ["0.0001 A", "0.001 A", "0.01 A", "0.1 A", "1 A"],
+                "DCI": ["0.0001 A", "0.001 A", "0.01 A", "0.1 A", "1 A", "3 A"],
             }
             return keysight_3446x.get(ui_mode, default[ui_mode])
 
@@ -189,7 +189,7 @@ class MultiMeterTab:
         if self._is_34410a:
             a34410a = {
                 "DCV": ["0.1 V", "1 V", "10 V", "100 V", "1000 V"],
-                "DCI": ["0.0001 A", "0.001 A", "0.01 A", "0.1 A", "1 A"],
+                "DCI": ["0.0001 A", "0.001 A", "0.01 A", "0.1 A", "1 A", "3 A"],
             }
             return a34410a.get(ui_mode, default[ui_mode])
 
@@ -197,7 +197,7 @@ class MultiMeterTab:
         if self._is_k2000:
             k2000 = {
                 "DCV": ["0.1 V", "1 V", "10 V", "100 V", "1000 V"],
-                "DCI": ["0.001 A", "0.01 A", "0.1 A", "1 A"],
+                "DCI": ["0.01 A", "0.1 A", "1 A", "3 A"],
             }
             return k2000.get(ui_mode, default[ui_mode])
 
@@ -205,15 +205,15 @@ class MultiMeterTab:
         if self._is_dmm4040:
             dmm4040 = {
                 "DCV": ["0.1 V", "1 V", "10 V", "100 V", "1000 V"],
-                "DCI": ["0.0001 A", "0.001 A", "0.01 A", "0.1 A", "1 A"],
+                "DCI": ["0.0001 A", "0.001 A", "0.01 A", "0.1 A", "0.4 A", "1 A", "3 A", "10 A"],
             }
             return dmm4040.get(ui_mode, default[ui_mode])
 
         # HP 3458A (DCV has finer low range; current kept conservative)
         if self._is_3458a:
             a3458a = {
-                "DCV": ["0.01 V", "0.1 V", "1 V", "10 V", "100 V", "1000 V"],
-                "DCI": ["0.01 A", "0.1 A", "1 A"],
+                "DCV": ["0.1 V", "1 V", "10 V", "100 V", "1000 V"],
+                "DCI": ["0.0000001 A", "0.000001 A", "0.00001 A", "0.0001 A", "0.001 A", "0.01 A", "0.1 A", "1 A"],
             }
             return a3458a.get(ui_mode, default[ui_mode])
 
